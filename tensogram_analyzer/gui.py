@@ -53,6 +53,8 @@ class TensogramApp(tk.Tk):
 
         self.last_result: core.AnalysisResult | None = None
         self.last_spectral: core.SpectralResult | None = None
+        self.last_speed_info: core.SpeedInfo | None = None
+        self.last_sweep_results: list[core.SpectralResult] | None = None
 
         self.span_selector: SpanSelector | None = None
         self._selection_patch = None
@@ -195,6 +197,38 @@ class TensogramApp(tk.Tk):
             fill=tk.X, padx=4, pady=(6, 2)
         )
 
+        row_vehicle = ttk.Frame(parent)
+        row_vehicle.pack(fill=tk.X, pady=4)
+
+        ttk.Label(row_vehicle, text="Длина пролёта, м:").grid(row=0, column=0, sticky="w", padx=4)
+        self.span_length_var = tk.StringVar(value="")
+        ttk.Entry(row_vehicle, textvariable=self.span_length_var, width=8).grid(
+            row=0, column=1, padx=4
+        )
+
+        ttk.Label(row_vehicle, text="Расчётная скорость, км/ч:").grid(
+            row=0, column=2, sticky="w", padx=4
+        )
+        self.design_speed_var = tk.StringVar(value="")
+        ttk.Entry(row_vehicle, textvariable=self.design_speed_var, width=8).grid(
+            row=0, column=3, padx=4
+        )
+
+        ttk.Label(row_vehicle, text="База автомобиля, м:").grid(
+            row=0, column=4, sticky="w", padx=4
+        )
+        self.wheelbase_var = tk.StringVar(value="")
+        ttk.Entry(row_vehicle, textvariable=self.wheelbase_var, width=8).grid(
+            row=0, column=5, padx=4
+        )
+
+        ttk.Label(
+            row_vehicle,
+            text="— используются для физически обоснованного выбора частоты первой формы "
+            "(период = время прохождения пролёта) и сопоставления расчётной и "
+            "фактической скорости в результатах",
+        ).grid(row=0, column=6, sticky="w", padx=8)
+
     def _build_stage2(self, parent: ttk.Frame) -> None:
         row_id = ttk.Frame(parent)
         row_id.pack(fill=tk.X, pady=4)
@@ -247,6 +281,14 @@ class TensogramApp(tk.Tk):
             row=0, column=4, padx=4
         )
 
+        self.spectrum_bar_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row_spec,
+            text="Столбчатая диаграмма спектра (вместо линии)",
+            variable=self.spectrum_bar_var,
+            command=self.on_toggle_spectrum_style,
+        ).grid(row=0, column=5, padx=12)
+
         row2 = ttk.Frame(parent)
         row2.pack(fill=tk.X, pady=4)
         ttk.Button(row2, text="Анализ", command=self.on_analyze).pack(side=tk.LEFT)
@@ -265,12 +307,14 @@ class TensogramApp(tk.Tk):
         self.result_dynamic_var = tk.StringVar(value="Макс. динамическое значение: —")
         self.result_kd_var = tk.StringVar(value="Динамический коэффициент: —")
         self.result_spectral_var = tk.StringVar(value="Спектральный анализ: —")
+        self.result_speed_var = tk.StringVar(value="Скорость движения: —")
 
         for var in (
             self.result_static_var,
             self.result_dynamic_var,
             self.result_kd_var,
             self.result_spectral_var,
+            self.result_speed_var,
         ):
             ttk.Label(results, textvariable=var, font=("TkDefaultFont", 10, "bold")).pack(
                 anchor="w", padx=6, pady=2
@@ -278,6 +322,14 @@ class TensogramApp(tk.Tk):
 
         spectral_info = ttk.LabelFrame(results_row, text="Справочная информация")
         spectral_info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.first_mode_info_var = tk.StringVar(
+            value="Кандидаты в частоту первой формы появятся после анализа."
+        )
+        ttk.Label(
+            spectral_info, textvariable=self.first_mode_info_var, justify="left", anchor="w",
+            wraplength=420,
+        ).pack(anchor="w", padx=6, pady=(2, 6), fill=tk.X)
 
         self.spectral_info_var = tk.StringVar(
             value="Метод определения частот и дискретизация спектра появятся после анализа."
@@ -327,6 +379,39 @@ class TensogramApp(tk.Tk):
         ttk.Button(controls, text="Запустить развёртку", command=self.on_run_sweep).grid(
             row=0, column=8, padx=12
         )
+
+        filters = ttk.Frame(parent)
+        filters.pack(fill=tk.X, pady=4)
+
+        ttk.Label(filters, text="Фильтр по частоте, Гц: больше").grid(
+            row=0, column=0, sticky="w", padx=4
+        )
+        self.sweep_freq_min_var = tk.StringVar(value="")
+        ttk.Entry(filters, textvariable=self.sweep_freq_min_var, width=8).grid(
+            row=0, column=1, padx=4
+        )
+        ttk.Label(filters, text="меньше").grid(row=0, column=2, sticky="w", padx=4)
+        self.sweep_freq_max_var = tk.StringVar(value="")
+        ttk.Entry(filters, textvariable=self.sweep_freq_max_var, width=8).grid(
+            row=0, column=3, padx=4
+        )
+
+        ttk.Label(filters, text="Скрыть пики с амплитудой более:").grid(
+            row=0, column=4, sticky="w", padx=(16, 4)
+        )
+        self.sweep_amp_max_var = tk.StringVar(value="")
+        ttk.Entry(filters, textvariable=self.sweep_amp_max_var, width=8).grid(
+            row=0, column=5, padx=4
+        )
+
+        ttk.Button(filters, text="Применить фильтр", command=self.on_apply_sweep_filter).grid(
+            row=0, column=6, padx=12
+        )
+        ttk.Label(
+            filters,
+            text="— фильтры применяются к уже выполненной развёртке (таблице и диаграмме), "
+            "без пустых полей учитываются все пики",
+        ).grid(row=0, column=7, sticky="w", padx=4)
 
         self.sweep_status_var = tk.StringVar(value="Развёртка ещё не выполнялась.")
         ttk.Label(parent, textvariable=self.sweep_status_var).pack(
@@ -583,6 +668,9 @@ class TensogramApp(tk.Tk):
         self.result_dynamic_var.set("Макс. динамическое значение: —")
         self.result_kd_var.set("Динамический коэффициент: —")
         self.result_spectral_var.set("Спектральный анализ: —")
+        self.result_speed_var.set("Скорость движения: —")
+        self.first_mode_info_var.set("Кандидаты в частоту первой формы появятся после анализа.")
+        self.last_speed_info = None
         self.status_var.set(
             f"Участок [{t_from:.3f} .. {t_to:.3f}] с выбран. Настройте параметры "
             "расчёта и нажмите 'Анализ'."
@@ -644,6 +732,26 @@ class TensogramApp(tk.Tk):
             return None
         return spec_delay, spec_window
 
+    def _parse_vehicle_params(self) -> tuple[float | None, float | None, float | None]:
+        """Длина пролёта, база автомобиля, расчётная скорость — необязательные
+        поля этапа 1; пустое или нечисловое значение трактуется как "не задано"
+        (без сообщения об ошибке), тогда физическая привязка не используется."""
+
+        def parse(var: tk.StringVar) -> float | None:
+            txt = var.get().strip()
+            if not txt:
+                return None
+            try:
+                return float(txt.replace(",", "."))
+            except ValueError:
+                return None
+
+        return (
+            parse(self.span_length_var),
+            parse(self.wheelbase_var),
+            parse(self.design_speed_var),
+        )
+
     def on_auto_cutoff(self) -> None:
         if self.ts_segment is None:
             return
@@ -651,20 +759,27 @@ class TensogramApp(tk.Tk):
         if params is None:
             return
         baseline_dur, _cutoff_hz, _neigh, _delay, _window = params
+        span_length, wheelbase, design_speed = self._parse_vehicle_params()
+        expected_freq = core.expected_first_mode_frequency(span_length, wheelbase, design_speed)
         try:
             baseline = core.segment_baseline(self.ts_segment, self.vs_segment, baseline_dur)
             vz = self.vs_segment - baseline
             fs = core.sampling_rate(self.ts_segment)
             duration = self.ts_segment[-1] - self.ts_segment[0]
-            f1 = core.detect_first_mode_frequency(vz, fs, duration)
-            cutoff = core.suggest_cutoff_frequency(vz, fs, duration)
+            f1 = core.detect_first_mode_frequency(vz, fs, duration, expected_freq=expected_freq)
+            cutoff = core.suggest_cutoff_frequency(vz, fs, duration, f1=f1)
         except core.TensogramError as exc:
             messagebox.showerror("Ошибка", str(exc))
             return
         self.cutoff_var.set(f"{cutoff:.4f}")
+        anchor_note = (
+            f" (ориентир по пролёту/скорости: {expected_freq:.4f} Гц)"
+            if expected_freq is not None
+            else ""
+        )
         self.status_var.set(
-            f"Автоопределение: частота первой формы ~{f1:.4f} Гц (период ~{1/f1:.2f} с), "
-            f"частота среза ~{cutoff:.4f} Гц."
+            f"Автоопределение: частота первой формы ~{f1:.4f} Гц (период ~{1/f1:.2f} с)"
+            f"{anchor_note}, частота среза ~{cutoff:.4f} Гц."
         )
 
     def on_analyze(self) -> None:
@@ -675,6 +790,8 @@ class TensogramApp(tk.Tk):
         if params is None:
             return
         baseline_dur, cutoff_hz, neighborhood_s, spec_delay, spec_window = params
+        span_length, wheelbase, design_speed = self._parse_vehicle_params()
+        expected_freq = core.expected_first_mode_frequency(span_length, wheelbase, design_speed)
 
         try:
             result = core.analyze_segment(
@@ -683,6 +800,7 @@ class TensogramApp(tk.Tk):
                 baseline_dur=baseline_dur,
                 cutoff_hz=cutoff_hz,
                 neighborhood_s=neighborhood_s,
+                expected_first_mode_freq=expected_freq,
             )
         except core.TensogramError as exc:
             messagebox.showerror("Ошибка анализа", str(exc))
@@ -690,8 +808,18 @@ class TensogramApp(tk.Tk):
 
         spectral = self._compute_spectral(result, spec_delay, spec_window)
 
+        speed_info: core.SpeedInfo | None = None
+        if span_length is not None and design_speed is not None:
+            try:
+                speed_info = core.compute_speed_info(
+                    span_length, wheelbase or 0.0, design_speed, result.crossing_period_s
+                )
+            except core.TensogramError as exc:
+                messagebox.showwarning("Скорость движения", str(exc))
+
         self.last_result = result
         self.last_spectral = spectral
+        self.last_speed_info = speed_info
         self.save_report_btn.config(state="normal")
         self.notebook.tab(self.tab3, state="normal")
 
@@ -707,13 +835,15 @@ class TensogramApp(tk.Tk):
             f"Динамический коэффициент: {result.dynamic_coefficient:.4f}"
         )
         self._update_spectral_result_label(spectral)
+        self._update_speed_result_label(result, speed_info)
+        self._update_first_mode_info(result)
 
         if not self.cutoff_var.get().strip():
             self.cutoff_var.set(f"{result.cutoff_hz:.4f}")
         if not self.neighborhood_var.get().strip():
             self.neighborhood_var.set(f"{result.neighborhood_s:.3f}")
 
-        plotting.draw_results_grid(self.figure, result, spectral)
+        plotting.draw_results_grid(self.figure, result, spectral, spectrum_style=self._spectrum_style())
         self.canvas.draw_idle()
         self.status_var.set(
             f"Расчёт выполнен. Ноль участка = {result.baseline:.4f}; "
@@ -740,6 +870,46 @@ class TensogramApp(tk.Tk):
             )
             return None
 
+    def _update_first_mode_info(self, result: core.AnalysisResult) -> None:
+        lines = ["Метод: локальные пики БПФ-спектра (после удаления линейного тренда),"]
+        lines.append(f"частоты до {core.MAX_FIRST_MODE_FREQ_HZ:.2f} Гц.")
+        if result.first_mode_candidates:
+            cand_txt = ", ".join(
+                f"{f:.4f} Гц ({a:.3g})" for f, a in result.first_mode_candidates
+            )
+            lines.append(f"Кандидаты (частота (амплитуда)): {cand_txt}.")
+        else:
+            lines.append("Значимых кандидатов не найдено.")
+        if result.expected_first_mode_freq is not None:
+            lines.append(
+                f"Ожидание по пролёту/базе/скорости: {result.expected_first_mode_freq:.4f} Гц "
+                f"— выбран ближайший к нему кандидат."
+            )
+        else:
+            lines.append(
+                "Выбрана наименьшая частота среди значимых кандидатов "
+                "(укажите длину пролёта, базу и расчётную скорость на этапе 1, "
+                "чтобы выбор опирался на физику проезда)."
+            )
+        lines.append(f"Выбрано: {result.first_mode_freq:.4f} Гц.")
+        self.first_mode_info_var.set("\n".join(lines))
+
+    def _update_speed_result_label(
+        self, result: core.AnalysisResult, speed_info: core.SpeedInfo | None
+    ) -> None:
+        if speed_info is not None:
+            self.result_speed_var.set(
+                f"Скорость — расчётная: {speed_info.design_speed_kmh:.2f} км/ч "
+                f"({speed_info.design_speed_kmh / 3.6:.2f} м/с); "
+                f"фактическая: {speed_info.actual_speed_kmh:.2f} км/ч "
+                f"({speed_info.actual_speed_m_s:.2f} м/с) "
+                f"[период {result.crossing_period_s:.2f} с]"
+            )
+        else:
+            self.result_speed_var.set(
+                "Скорость движения: укажите длину пролёта и расчётную скорость на этапе 1"
+            )
+
     def _update_spectral_result_label(self, spectral: core.SpectralResult | None) -> None:
         if spectral is not None and len(spectral.peak_freqs) > 0:
             freqs_txt = ", ".join(f"{f:.3f}" for f in spectral.peak_freqs)
@@ -764,6 +934,17 @@ class TensogramApp(tk.Tk):
                 "Метод определения частот и дискретизация спектра появятся после анализа."
             )
 
+    def _spectrum_style(self) -> str:
+        return "bar" if self.spectrum_bar_var.get() else "line"
+
+    def on_toggle_spectrum_style(self) -> None:
+        if self.last_result is not None:
+            plotting.draw_results_grid(
+                self.figure, self.last_result, self.last_spectral,
+                spectrum_style=self._spectrum_style(),
+            )
+            self.canvas.draw_idle()
+
     def on_refresh_spectral(self) -> None:
         if self.last_result is None:
             messagebox.showwarning(
@@ -779,13 +960,74 @@ class TensogramApp(tk.Tk):
         self.last_spectral = spectral
         self._update_spectral_result_label(spectral)
 
-        plotting.draw_results_grid(self.figure, self.last_result, spectral)
+        plotting.draw_results_grid(self.figure, self.last_result, spectral, spectrum_style=self._spectrum_style())
         self.canvas.draw_idle()
 
         if spectral is not None:
             self.status_var.set(
                 f"Спектр пересчитан для окна {spectral.t_start:.2f}..{spectral.t_end:.2f} с."
             )
+
+    def _parse_sweep_filters(self) -> tuple[float | None, float | None, float | None] | None:
+        def parse(var: tk.StringVar) -> float | None:
+            txt = var.get().strip()
+            return float(txt.replace(",", ".")) if txt else None
+
+        try:
+            freq_min = parse(self.sweep_freq_min_var)
+            freq_max = parse(self.sweep_freq_max_var)
+            amp_max = parse(self.sweep_amp_max_var)
+        except ValueError:
+            messagebox.showerror(
+                "Неверные параметры", "Границы фильтра по частоте/амплитуде должны быть числами."
+            )
+            return None
+        return freq_min, freq_max, amp_max
+
+    def _render_sweep_results(self) -> None:
+        assert self.last_sweep_results is not None
+        filters = self._parse_sweep_filters()
+        if filters is None:
+            return
+        freq_min, freq_max, amp_max = filters
+
+        for row in self.sweep_tree.get_children():
+            self.sweep_tree.delete(row)
+
+        points: list[tuple[float, float, float]] = []
+        for res in self.last_sweep_results:
+            peaks = [
+                (f, a) for f, a in zip(res.peak_freqs, res.peak_amps)
+                if (freq_min is None or f >= freq_min)
+                and (freq_max is None or f <= freq_max)
+                and (amp_max is None or a <= amp_max)
+            ]
+            points.extend((res.delay_s, f, a) for f, a in peaks)
+
+            freqs_only = [f for f, _ in peaks[:5]]
+            freqs_only += [None] * (5 - len(freqs_only))
+            values = [f"{res.delay_s:.3f}"] + [
+                "" if f is None else f"{f:.3f}" for f in freqs_only
+            ]
+            self.sweep_tree.insert("", "end", values=values)
+
+        plotting.draw_delay_sweep(self.sweep_figure, points)
+        self.sweep_canvas.draw_idle()
+
+        filter_note = ""
+        if freq_min is not None or freq_max is not None or amp_max is not None:
+            parts = []
+            if freq_min is not None:
+                parts.append(f"частота ≥ {freq_min:g} Гц")
+            if freq_max is not None:
+                parts.append(f"частота ≤ {freq_max:g} Гц")
+            if amp_max is not None:
+                parts.append(f"амплитуда ≤ {amp_max:g}")
+            filter_note = f"; фильтр: {', '.join(parts)}"
+        self.sweep_status_var.set(
+            f"Развёртка: {len(self.last_sweep_results)} задержек, показано {len(points)} "
+            f"пиков{filter_note}."
+        )
 
     def on_run_sweep(self) -> None:
         if self.last_result is None:
@@ -815,23 +1057,16 @@ class TensogramApp(tk.Tk):
             messagebox.showerror("Ошибка развёртки", str(exc))
             return
 
-        for row in self.sweep_tree.get_children():
-            self.sweep_tree.delete(row)
-        for res in sweep_results:
-            peaks = list(res.peak_freqs[:5])
-            peaks += [None] * (5 - len(peaks))
-            values = [f"{res.delay_s:.3f}"] + [
-                "" if p is None else f"{p:.3f}" for p in peaks
-            ]
-            self.sweep_tree.insert("", "end", values=values)
+        self.last_sweep_results = sweep_results
+        self._render_sweep_results()
 
-        plotting.draw_delay_sweep(self.sweep_figure, sweep_results)
-        self.sweep_canvas.draw_idle()
-
-        self.sweep_status_var.set(
-            f"Развёртка выполнена: {len(sweep_results)} задержек от {delay_from:.2f} до "
-            f"{delay_to:.2f} с (шаг {delay_step:.2f} с), окно {window_s:.2f} с."
-        )
+    def on_apply_sweep_filter(self) -> None:
+        if self.last_sweep_results is None:
+            messagebox.showwarning(
+                "Нет развёртки", "Сначала нажмите 'Запустить развёртку'."
+            )
+            return
+        self._render_sweep_results()
 
     def on_save_report(self) -> None:
         if self.last_result is None:
@@ -852,7 +1087,8 @@ class TensogramApp(tk.Tk):
 
         try:
             out_dir = report.save_report(
-                base_dir, point_name, comment, self.last_result, self.last_spectral
+                base_dir, point_name, comment, self.last_result, self.last_spectral,
+                self.last_speed_info,
             )
         except OSError as exc:
             messagebox.showerror("Ошибка сохранения", f"Не удалось сохранить отчёт:\n{exc}")

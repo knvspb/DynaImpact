@@ -74,23 +74,6 @@ def draw_overview(
         ax.legend(loc="best", fontsize=8)
 
 
-def _find_zero_crossing_bounds(ts: np.ndarray, curve: np.ndarray, i_peak: int) -> tuple[int, int]:
-    """От индекса пика ищет ближайшие пересечения нуля слева и справа —
-    границы "горба" статического воздействия (от нуля до нуля)."""
-    n = len(curve)
-    sign_peak = 1.0 if curve[i_peak] >= 0 else -1.0
-
-    i_left = i_peak
-    while i_left > 0 and np.sign(curve[i_left - 1]) == sign_peak:
-        i_left -= 1
-
-    i_right = i_peak
-    while i_right < n - 1 and np.sign(curve[i_right + 1]) == sign_peak:
-        i_right += 1
-
-    return i_left, i_right
-
-
 def draw_zoom(ax, result: core.AnalysisResult) -> None:
     """Увеличенный вид: фрагмент "от нуля до нуля" — от точки, где
     квазистатическая (первая форма) кривая уходит от нуля, до точки,
@@ -99,9 +82,7 @@ def draw_zoom(ax, result: core.AnalysisResult) -> None:
     динамического максимумов (это единственная задача этого вида —
     окно спектрального анализа показывают отдельные графики, и
     растягивать этот вид ради него не нужно)."""
-    i_peak = int(np.argmin(np.abs(result.ts - result.t_static_max)))
-    i_left, i_right = _find_zero_crossing_bounds(result.ts, result.static_curve, i_peak)
-    t_left, t_right = result.ts[i_left], result.ts[i_right]
+    t_left, t_right = result.t_hump_start, result.t_hump_end
 
     # Небольшой запас по краям, чтобы нулевые точки не упирались в рамку
     # графика, плюс гарантия, что окрестность поиска динамики видна целиком.
@@ -131,7 +112,14 @@ def draw_spectral_window(ax, spectral: core.SpectralResult) -> None:
     ax.grid(True, alpha=0.3)
 
 
-def draw_spectrum(ax, spectral: core.SpectralResult, max_freq: float | None = None) -> None:
+def draw_spectrum(
+    ax, spectral: core.SpectralResult, max_freq: float | None = None, style: str = "line",
+) -> None:
+    """`style`: "line" — обычный график амплитудного спектра; "bar" —
+    столбчатая диаграмма (иногда корректнее отражает суть: спектр БПФ —
+    это набор дискретных частотных бинов с шагом Δf = 1/длина окна, а не
+    непрерывная функция, и для редких/широких бинов столбцы читаются
+    нагляднее сплошной линии)."""
     freqs = spectral.freqs
     spectrum = spectral.spectrum
     if max_freq is None:
@@ -141,7 +129,14 @@ def draw_spectrum(ax, spectral: core.SpectralResult, max_freq: float | None = No
             max_freq = freqs.max()
         max_freq = max(max_freq, 1.0)
     mask = freqs <= max_freq
-    ax.plot(freqs[mask], spectrum[mask], linewidth=1.0, color="tab:purple")
+    if style == "bar":
+        bin_width = float(freqs[1] - freqs[0]) if len(freqs) > 1 else 0.1
+        ax.bar(
+            freqs[mask], spectrum[mask], width=bin_width * 0.9,
+            color="tab:purple", align="center",
+        )
+    else:
+        ax.plot(freqs[mask], spectrum[mask], linewidth=1.0, color="tab:purple")
 
     shown = [(f, a) for f, a in zip(spectral.peak_freqs, spectral.peak_amps) if f <= max_freq]
     for f, a in shown:
@@ -182,7 +177,10 @@ def draw_spectrum(ax, spectral: core.SpectralResult, max_freq: float | None = No
         ax.set_ylim(top=top_amp * 1.15, bottom=min(0.0, ax.get_ylim()[0]))
 
 
-def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.SpectralResult | None) -> None:
+def draw_results_grid(
+    figure, result: core.AnalysisResult, spectral: core.SpectralResult | None,
+    spectrum_style: str = "line",
+) -> None:
     """Строит стандартную сетку 2x2 результатов на переданной Figure."""
     figure.clear()
     ax_overview = figure.add_subplot(221)
@@ -195,7 +193,7 @@ def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.Spectr
 
     if spectral is not None:
         draw_spectral_window(ax_spec_time, spectral)
-        draw_spectrum(ax_spec_freq, spectral)
+        draw_spectrum(ax_spec_freq, spectral, style=spectrum_style)
     else:
         for ax, msg in (
             (ax_spec_time, "Спектральный анализ не выполнен"),
@@ -208,23 +206,21 @@ def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.Spectr
     figure.tight_layout()
 
 
-def draw_delay_sweep(figure, results: list[core.SpectralResult]) -> None:
+def draw_delay_sweep(figure, points: list[tuple[float, float, float]]) -> None:
     """Диаграмма развёртки: для каждой задержки — обнаруженные пиковые
     частоты спектра, цветом показана амплитуда пика. Устойчивая
     (не зависящая от задержки) частота выглядит как горизонтальная
     полоса точек — это и есть частота собственных колебаний
-    конструкции, в отличие от случайных/переходных пиков."""
+    конструкции, в отличие от случайных/переходных пиков.
+
+    `points` — уже отфильтрованный (по частоте/амплитуде, если оператор
+    задал фильтры) плоский список (задержка, частота, амплитуда)."""
     figure.clear()
     ax = figure.add_subplot(111)
 
-    xs: list[float] = []
-    ys: list[float] = []
-    amps: list[float] = []
-    for res in results:
-        for f, a in zip(res.peak_freqs, res.peak_amps):
-            xs.append(res.delay_s)
-            ys.append(f)
-            amps.append(a)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    amps = [p[2] for p in points]
 
     if not xs:
         ax.text(0.5, 0.5, "Нет данных", ha="center", va="center", transform=ax.transAxes)

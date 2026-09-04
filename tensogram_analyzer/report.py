@@ -26,6 +26,7 @@ def _summary_rows(
     comment: str,
     result: core.AnalysisResult,
     spectral: core.SpectralResult | None,
+    speed_info: core.SpeedInfo | None = None,
 ) -> list[tuple[str, str]]:
     rows = [
         ("Название точки", point_name),
@@ -37,13 +38,35 @@ def _summary_rows(
         ("Период первой формы, с", f"{result.first_mode_period:.6g}"),
         ("Частота среза фильтра, Гц", f"{result.cutoff_hz:.6g}"),
         ("Окрестность поиска динамики, с", f"{result.neighborhood_s:.6g}"),
+    ]
+    if result.first_mode_candidates:
+        cand_txt = ", ".join(f"{f:.4g} Гц ({a:.4g})" for f, a in result.first_mode_candidates)
+        rows.append(("Кандидаты частоты первой формы (частота (амплитуда))", cand_txt))
+    if result.expected_first_mode_freq is not None:
+        rows.append((
+            "Ожидаемая частота первой формы (из пролёта/базы/скорости), Гц",
+            f"{result.expected_first_mode_freq:.6g}",
+        ))
+    rows += [
         ("", ""),
         ("Максимальное статическое значение", f"{result.static_max:.6g}"),
         ("Время максимального статического значения, с", f"{result.t_static_max:.6g}"),
         ("Максимальное динамическое значение", f"{result.dynamic_max:.6g}"),
         ("Время максимального динамического значения, с", f"{result.t_dynamic_max:.6g}"),
         ("Динамический коэффициент", f"{result.dynamic_coefficient:.6g}"),
+        ("", ""),
+        ("Границы горба (от нуля до нуля), с", f"{result.t_hump_start:.6g} .. {result.t_hump_end:.6g}"),
+        ("Период прохождения (время между нулями), с", f"{result.crossing_period_s:.6g}"),
     ]
+    if speed_info is not None:
+        rows += [
+            ("Длина пролёта, м", f"{speed_info.span_length_m:.6g}"),
+            ("База автомобиля, м", f"{speed_info.wheelbase_m:.6g}"),
+            ("Расчётная скорость", f"{speed_info.design_speed_kmh:.6g} км/ч "
+                                    f"({speed_info.design_speed_kmh / 3.6:.6g} м/с)"),
+            ("Фактическая скорость", f"{speed_info.actual_speed_kmh:.6g} км/ч "
+                                      f"({speed_info.actual_speed_m_s:.6g} м/с)"),
+        ]
     if spectral is not None:
         rows += [
             ("", ""),
@@ -62,8 +85,9 @@ def write_values_csv(
     comment: str,
     result: core.AnalysisResult,
     spectral: core.SpectralResult | None,
+    speed_info: core.SpeedInfo | None = None,
 ) -> None:
-    rows = _summary_rows(point_name, comment, result, spectral)
+    rows = _summary_rows(point_name, comment, result, spectral, speed_info)
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, delimiter=";")
         writer.writerow(["Параметр", "Значение"])
@@ -108,6 +132,7 @@ def save_report(
     comment: str,
     result: core.AnalysisResult,
     spectral: core.SpectralResult | None,
+    speed_info: core.SpeedInfo | None = None,
 ) -> str:
     """Создаёт подпапку `base_dir/<название точки>` и сохраняет в неё
     report.pdf, CSV-файлы со значениями и рядами данных, а также
@@ -116,7 +141,9 @@ def save_report(
     out_dir = os.path.join(base_dir, dirname)
     os.makedirs(out_dir, exist_ok=True)
 
-    write_values_csv(os.path.join(out_dir, "values.csv"), point_name, comment, result, spectral)
+    write_values_csv(
+        os.path.join(out_dir, "values.csv"), point_name, comment, result, spectral, speed_info
+    )
     write_segment_csv(os.path.join(out_dir, "segment_data.csv"), result)
     if spectral is not None:
         write_spectrum_csv(os.path.join(out_dir, "spectrum.csv"), spectral)
@@ -141,7 +168,7 @@ def save_report(
             lines.append("Комментарий:")
             lines.append(comment.strip())
             lines.append("")
-        for key, value in _summary_rows(point_name, comment, result, spectral):
+        for key, value in _summary_rows(point_name, comment, result, spectral, speed_info):
             if key == "":
                 lines.append("")
             else:

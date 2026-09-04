@@ -338,40 +338,97 @@ MAX_FIRST_MODE_FREQ_HZ = 1.0
 """
 
 
-def detect_first_mode_frequency(
-    vz: np.ndarray, fs: float, duration: float, threshold_ratio: float = 0.2
-) -> float:
-    """Оценивает частоту первой формы колебаний (наименьшая значимая частота).
+def first_mode_candidates(
+    vz: np.ndarray,
+    fs: float,
+    duration: float,
+    max_freq: float = MAX_FIRST_MODE_FREQ_HZ,
+    n: int = 8,
+) -> list[tuple[float, float]]:
+    """Возвращает все правдоподобные кандидаты в частоту первой формы —
+    локальные пики спектра в диапазоне [2/длительность, `max_freq`] Гц,
+    отсортированные по частоте (до `n` штук, отобранных по амплитуде).
 
-    Учитываются только частоты, для которых на участке укладывается не
-    менее двух периодов (иначе колебание нельзя достоверно выделить),
-    амплитуда которых не менее `threshold_ratio` от максимальной в
-    спектре, и которые не превышают `MAX_FIRST_MODE_FREQ_HZ` (см. её
-    описание — реальная первая форма сооружения не бывает выше ~1 Гц).
+    Список отдаётся оператору целиком (см. `AnalysisResult.first_mode_candidates`)
+    для ручной калибровки — окончательный выбор одной частоты из них
+    делает `choose_first_mode_frequency`.
     """
-    n = len(vz)
-    if n < 8 or duration <= 0:
-        return 1.0
+    n_samples = len(vz)
+    if n_samples < 8 or duration <= 0:
+        return []
 
     freqs, spectrum = fft_spectrum(vz, fs)
 
+    # Пики ищутся по ПОЛНОМУ спектру, а не по уже обрезанному до
+    # [f_min, max_freq] срезу: иначе бин ровно на границе среза не имеет
+    # соседа с одной стороны в обрезанном массиве и find_peaks никогда не
+    # распознает его как пик, даже если он — истинный (и часто самый
+    # значимый) локальный максимум спектра.
+    all_peak_idx, _ = find_peaks(spectrum)
+
     f_min = 2.0 / duration
-    valid = (freqs >= f_min) & (freqs <= MAX_FIRST_MODE_FREQ_HZ)
-    if not valid.any():
-        # Участок короче ~2 с (f_min уже выше предела) — ограничение
-        # неприменимо, используем частоты как есть.
-        valid = freqs >= f_min
-    spec_valid = spectrum[valid]
-    freq_valid = freqs[valid]
+    in_range = (freqs[all_peak_idx] >= f_min) & (freqs[all_peak_idx] <= max_freq)
+    peak_idx = all_peak_idx[in_range]
 
-    if len(spec_valid) == 0 or spec_valid.max() <= 0:
-        return f_min
+    if len(peak_idx) == 0:
+        valid = (freqs >= f_min) & (freqs <= max_freq)
+        if not valid.any():
+            valid = freqs >= f_min
+        if not valid.any() or spectrum[valid].max() <= 0:
+            return []
+        peak_idx = np.where(valid)[0][[np.argmax(spectrum[valid])]]
 
-    threshold = threshold_ratio * spec_valid.max()
-    candidates = freq_valid[spec_valid >= threshold]
-    if len(candidates) == 0:
-        return float(freq_valid[np.argmax(spec_valid)])
-    return float(candidates.min())
+    order = np.argsort(spectrum[peak_idx])[::-1][:n]
+    chosen = peak_idx[order]
+    chosen = chosen[np.argsort(freqs[chosen])]
+    return [(float(freqs[i]), float(spectrum[i])) for i in chosen]
+
+
+def choose_first_mode_frequency(
+    candidates: list[tuple[float, float]],
+    duration: float,
+    threshold_ratio: float = 0.2,
+    expected_freq: float | None = None,
+) -> float:
+    """Выбирает одну частоту первой формы из списка кандидатов.
+
+    Если задана `expected_freq` (физически ожидаемая частота — например,
+    из условия "период = время прохождения автомобиля по пролёту"),
+    берётся ближайший к ней кандидат: это привязывает выбор к физике
+    задачи, а не только к тому, какой пик спектра случайно оказался
+    самым низкочастотным значимым. Иначе используется прежняя эвристика:
+    наименьшая частота среди кандидатов с амплитудой не менее
+    `threshold_ratio` от максимальной.
+    """
+    if not candidates:
+        return 2.0 / duration if duration > 0 else 1.0
+
+    if expected_freq is not None and expected_freq > 0:
+        return min(candidates, key=lambda c: abs(c[0] - expected_freq))[0]
+
+    max_amp = max(a for _, a in candidates)
+    significant = [f for f, a in candidates if a >= threshold_ratio * max_amp]
+    return min(significant) if significant else candidates[0][0]
+
+
+def detect_first_mode_frequency(
+    vz: np.ndarray,
+    fs: float,
+    duration: float,
+    threshold_ratio: float = 0.2,
+    expected_freq: float | None = None,
+) -> float:
+    """Оценивает частоту первой формы колебаний.
+
+    Учитываются только частоты, для которых на участке укладывается не
+    менее двух периодов (иначе колебание нельзя достоверно выделить), и
+    которые не превышают `MAX_FIRST_MODE_FREQ_HZ` (см. её описание —
+    реальная первая форма сооружения не бывает выше ~1 Гц). См.
+    `choose_first_mode_frequency` за тем, как из кандидатов выбирается
+    итоговое значение (в том числе с учётом `expected_freq`).
+    """
+    candidates = first_mode_candidates(vz, fs, duration)
+    return choose_first_mode_frequency(candidates, duration, threshold_ratio, expected_freq)
 
 
 MAX_CUTOFF_SEARCH_HZ = 3.0
@@ -393,6 +450,7 @@ def suggest_cutoff_frequency(
     vz: np.ndarray,
     fs: float,
     duration: float,
+    f1: float | None = None,
     gap_ratio: float = 0.03,
     gap_span_hz: float = 0.3,
     fallback_multiplier: float = 1.6,
@@ -417,6 +475,12 @@ def suggest_cutoff_frequency(
     Если такого провала не находится (спектр непрерывный, без чёткого
     разделения), используется запасной вариант: `fallback_multiplier`,
     умноженный на частоту первой формы.
+
+    Если `f1` передана явно (например, итоговый выбор
+    `choose_first_mode_frequency`, в том числе с учётом физически
+    ожидаемой частоты), используется она — чтобы срез и сама частота
+    первой формы были согласованы между собой, а не определялись двумя
+    независимыми эвристиками.
     """
     n = len(vz)
     if n < 8 or duration <= 0:
@@ -431,9 +495,10 @@ def suggest_cutoff_frequency(
     if not valid.any() or spectrum[valid].max() <= 0:
         return f_min * fallback_multiplier
 
-    spec_valid = spectrum[valid]
-    freq_valid = freqs[valid]
-    f1 = float(freq_valid[np.argmax(spec_valid)])
+    if f1 is None:
+        spec_valid = spectrum[valid]
+        freq_valid = freqs[valid]
+        f1 = float(freq_valid[np.argmax(spec_valid)])
 
     threshold = gap_ratio * spectrum[valid].max()
     below_threshold = spectrum < threshold
@@ -458,6 +523,97 @@ def lowpass_filter(vz: np.ndarray, fs: float, cutoff_hz: float, order: int = 2) 
     return filtfilt(b, a, vz)
 
 
+def find_zero_crossing_bounds(ts: np.ndarray, curve: np.ndarray, t_peak: float) -> tuple[float, float]:
+    """От момента `t_peak` ищет ближайшие пересечения нуля кривой `curve`
+    слева и справа — границы "горба" (от нуля до нуля), содержащего пик.
+    """
+    i_peak = int(np.argmin(np.abs(ts - t_peak)))
+    n = len(curve)
+    sign_peak = 1.0 if curve[i_peak] >= 0 else -1.0
+
+    i_left = i_peak
+    while i_left > 0 and np.sign(curve[i_left - 1]) == sign_peak:
+        i_left -= 1
+
+    i_right = i_peak
+    while i_right < n - 1 and np.sign(curve[i_right + 1]) == sign_peak:
+        i_right += 1
+
+    return float(ts[i_left]), float(ts[i_right])
+
+
+def compute_vehicle_speed(
+    span_length_m: float, wheelbase_m: float, crossing_period_s: float
+) -> tuple[float, float]:
+    """Оценивает фактическую скорость автомобиля по времени прохождения
+    пролёта.
+
+    Пока хотя бы одна ось автомобиля находится на пролёте, он проходит
+    расстояние "длина пролёта + база автомобиля" (от въезда передней оси
+    до съезда задней). Время этого прохождения — период "от нуля до
+    нуля" квазистатической кривой (см. `find_zero_crossing_bounds`).
+
+    Возвращает (скорость, м/с; скорость, км/ч).
+    """
+    if crossing_period_s <= 0:
+        raise TensogramError("Период прохождения (время между нулями) должен быть положительным.")
+    if span_length_m <= 0:
+        raise TensogramError("Длина пролёта должна быть положительной.")
+    if wheelbase_m < 0:
+        raise TensogramError("База автомобиля не может быть отрицательной.")
+
+    distance_m = span_length_m + wheelbase_m
+    speed_m_s = distance_m / crossing_period_s
+    speed_kmh = speed_m_s * 3.6
+    return speed_m_s, speed_kmh
+
+
+@dataclass
+class SpeedInfo:
+    span_length_m: float
+    wheelbase_m: float
+    design_speed_kmh: float
+    crossing_period_s: float
+    actual_speed_m_s: float
+    actual_speed_kmh: float
+
+
+def compute_speed_info(
+    span_length_m: float, wheelbase_m: float, design_speed_kmh: float, crossing_period_s: float
+) -> SpeedInfo:
+    """Сопоставляет расчётную скорость (введённую оператором) и
+    фактическую (по времени прохождения пролёта, см. `compute_vehicle_speed`)."""
+    speed_m_s, speed_kmh = compute_vehicle_speed(span_length_m, wheelbase_m, crossing_period_s)
+    return SpeedInfo(
+        span_length_m=span_length_m,
+        wheelbase_m=wheelbase_m,
+        design_speed_kmh=design_speed_kmh,
+        crossing_period_s=crossing_period_s,
+        actual_speed_m_s=speed_m_s,
+        actual_speed_kmh=speed_kmh,
+    )
+
+
+def expected_first_mode_frequency(
+    span_length_m: float | None, wheelbase_m: float | None, design_speed_kmh: float | None
+) -> float | None:
+    """Ожидаемая частота первой формы, исходя из условия: период первой
+    формы равен времени прохождения автомобилем пролёта на расчётной
+    скорости. Возвращает None, если каких-то из трёх исходных данных нет
+    или они некорректны (тогда выбор частоты опирается только на спектр).
+    """
+    if span_length_m is None or wheelbase_m is None or design_speed_kmh is None:
+        return None
+    if span_length_m <= 0 or wheelbase_m < 0 or design_speed_kmh <= 0:
+        return None
+    distance_m = span_length_m + wheelbase_m
+    speed_m_s = design_speed_kmh / 3.6
+    expected_period_s = distance_m / speed_m_s
+    if expected_period_s <= 0:
+        return None
+    return 1.0 / expected_period_s
+
+
 # --------------------------------------------------------------------------
 # Полный расчёт
 # --------------------------------------------------------------------------
@@ -467,6 +623,8 @@ class AnalysisResult:
     baseline: float
     first_mode_freq: float
     first_mode_period: float
+    first_mode_candidates: list[tuple[float, float]]  # (частота, амплитуда), для калибровки
+    expected_first_mode_freq: float | None  # из длины пролёта/скорости/базы, если заданы
     cutoff_hz: float
     neighborhood_s: float
 
@@ -477,6 +635,10 @@ class AnalysisResult:
     t_dynamic_max: float
 
     dynamic_coefficient: float
+
+    t_hump_start: float  # границы "горба" статики (от нуля до нуля), содержащего t_static_max
+    t_hump_end: float
+    crossing_period_s: float  # = t_hump_end - t_hump_start
 
     ts: np.ndarray
     vs: np.ndarray  # исходный (не зануленный) сигнал участка
@@ -494,11 +656,17 @@ def analyze_segment(
     cutoff_hz: float | None = None,
     cutoff_multiplier: float = 1.6,
     neighborhood_s: float | None = None,
+    expected_first_mode_freq: float | None = None,
 ) -> AnalysisResult:
     """Выполняет полный расчёт по выбранному участку тензограммы.
 
     Параметры `cutoff_hz` и `neighborhood_s`, если заданы явно (из GUI),
     имеют приоритет над автоматически определяемыми значениями.
+
+    `expected_first_mode_freq` — физически ожидаемая частота первой формы
+    (из длины пролёта, базы автомобиля и расчётной скорости, см.
+    `expected_first_mode_frequency`); если задана, используется как
+    ориентир при выборе среди кандидатов в частоту первой формы.
     """
     if len(ts) < 8:
         raise TensogramError("Недостаточно точек для анализа участка.")
@@ -509,11 +677,12 @@ def analyze_segment(
     fs = sampling_rate(ts)
     duration = ts[-1] - ts[0]
 
-    f1 = detect_first_mode_frequency(vz, fs, duration)
+    candidates = first_mode_candidates(vz, fs, duration)
+    f1 = choose_first_mode_frequency(candidates, duration, expected_freq=expected_first_mode_freq)
 
     if cutoff_hz is None or cutoff_hz <= 0:
         cutoff_hz = suggest_cutoff_frequency(
-            vz, fs, duration, fallback_multiplier=cutoff_multiplier
+            vz, fs, duration, f1=f1, fallback_multiplier=cutoff_multiplier
         )
 
     static_curve = lowpass_filter(vz, fs, cutoff_hz)
@@ -540,10 +709,14 @@ def analyze_segment(
     else:
         dynamic_coefficient = abs(dynamic_max) / abs(static_max)
 
+    t_hump_start, t_hump_end = find_zero_crossing_bounds(ts, static_curve, t_static_max)
+
     return AnalysisResult(
         baseline=baseline,
         first_mode_freq=f1,
         first_mode_period=(1.0 / f1 if f1 > 0 else float("inf")),
+        first_mode_candidates=candidates,
+        expected_first_mode_freq=expected_first_mode_freq,
         cutoff_hz=cutoff_hz,
         neighborhood_s=neighborhood_s,
         static_max=static_max,
@@ -551,6 +724,9 @@ def analyze_segment(
         dynamic_max=dynamic_max,
         t_dynamic_max=t_dynamic_max,
         dynamic_coefficient=dynamic_coefficient,
+        t_hump_start=t_hump_start,
+        t_hump_end=t_hump_end,
+        crossing_period_s=t_hump_end - t_hump_start,
         ts=ts,
         vs=vs,
         vz=vz,
