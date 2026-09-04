@@ -155,7 +155,66 @@ def detect_first_mode_frequency(
     return float(candidates.min())
 
 
-def lowpass_filter(vz: np.ndarray, fs: float, cutoff_hz: float, order: int = 4) -> np.ndarray:
+def suggest_cutoff_frequency(
+    vz: np.ndarray,
+    fs: float,
+    duration: float,
+    gap_ratio: float = 0.03,
+    gap_span_hz: float = 0.3,
+    fallback_multiplier: float = 1.6,
+) -> float:
+    """Подбирает частоту среза, отделяющую первую форму (и её гармоники,
+    формирующие форму нарастания/спада статического воздействия) от
+    более высокочастотных форм колебаний конструкции.
+
+    Одиночный "горб" статического воздействия, как правило, несинусоидален
+    и поэтому даёт в спектре не одну частоту, а основную частоту первой
+    формы и набор её гармоник убывающей амплитуды. Простой срез сразу
+    после первой формы (например, в 1.5–2 раза выше её частоты) обрезает
+    и эти гармоники, занижая максимум статической составляющей.
+
+    Вместо этого ищется первый достаточно широкий провал в спектре
+    (участок, где амплитуда падает ниже `gap_ratio` от максимума и
+    остаётся такой на протяжении не менее `gap_span_hz`) после частоты
+    первой формы — он отделяет затухающие гармоники формы нагружения от
+    старших форм/вибраций конструкции. Частота среза берётся на границе
+    этого провала.
+
+    Если такого провала не находится (спектр непрерывный, без чёткого
+    разделения), используется запасной вариант: `fallback_multiplier`,
+    умноженный на частоту первой формы.
+    """
+    n = len(vz)
+    if n < 8 or duration <= 0:
+        return 1.0
+
+    vz_detrended = detrend(vz, type="linear")
+    window = np.hanning(n)
+    spectrum = np.abs(np.fft.rfft(vz_detrended * window))
+    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+
+    f_min = 2.0 / duration
+    valid = freqs >= f_min
+    if not valid.any() or spectrum[valid].max() <= 0:
+        return f_min * fallback_multiplier
+
+    spec_valid = spectrum[valid]
+    freq_valid = freqs[valid]
+    f1 = float(freq_valid[np.argmax(spec_valid)])
+
+    threshold = gap_ratio * spectrum[valid].max()
+    below_threshold = spectrum < threshold
+    candidate_idx = np.where((freqs > f1) & below_threshold)[0]
+
+    for i in candidate_idx:
+        span_mask = (freqs >= freqs[i]) & (freqs <= freqs[i] + gap_span_hz)
+        if span_mask.sum() > 3 and below_threshold[span_mask].all():
+            return float(freqs[i])
+
+    return f1 * fallback_multiplier
+
+
+def lowpass_filter(vz: np.ndarray, fs: float, cutoff_hz: float, order: int = 2) -> np.ndarray:
     """Фазово-нейтральная низкочастотная фильтрация (Баттерворт, filtfilt)."""
     nyq = fs / 2.0
     cutoff = min(max(cutoff_hz, 1e-6), nyq * 0.98)
@@ -191,6 +250,9 @@ class AnalysisResult:
     static_curve: np.ndarray  # выделенная первая форма (статика)
 
 
+DEFAULT_NEIGHBORHOOD_S = 1.0
+
+
 def analyze_segment(
     ts: np.ndarray,
     vs: np.ndarray,
@@ -216,7 +278,9 @@ def analyze_segment(
     f1 = detect_first_mode_frequency(vz, fs, duration)
 
     if cutoff_hz is None or cutoff_hz <= 0:
-        cutoff_hz = f1 * cutoff_multiplier
+        cutoff_hz = suggest_cutoff_frequency(
+            vz, fs, duration, fallback_multiplier=cutoff_multiplier
+        )
 
     static_curve = lowpass_filter(vz, fs, cutoff_hz)
 
@@ -225,7 +289,7 @@ def analyze_segment(
     t_static_max = float(ts[i_static])
 
     if neighborhood_s is None or neighborhood_s <= 0:
-        neighborhood_s = max(1.0 / f1, 1.0) if f1 > 0 else 1.0
+        neighborhood_s = DEFAULT_NEIGHBORHOOD_S
 
     mask = np.abs(ts - t_static_max) <= neighborhood_s
     if not mask.any():

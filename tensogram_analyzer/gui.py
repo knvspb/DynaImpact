@@ -122,7 +122,7 @@ class TensogramApp(tk.Tk):
         ttk.Label(row1, text="Окрестность поиска динамики, с:").grid(
             row=0, column=5, sticky="w", padx=4
         )
-        self.neighborhood_var = tk.StringVar(value="")
+        self.neighborhood_var = tk.StringVar(value="1")
         ttk.Entry(row1, textvariable=self.neighborhood_var, width=8).grid(row=0, column=6, padx=4)
 
         row2 = ttk.Frame(parent)
@@ -233,7 +233,7 @@ class TensogramApp(tk.Tk):
         self.notebook.tab(self.tab2, state="normal")
         self.notebook.select(self.tab2)
         self.cutoff_var.set("")
-        self.neighborhood_var.set("")
+        self.neighborhood_var.set("1")
         self.result_static_var.set("Макс. статическое значение: —")
         self.result_dynamic_var.set("Макс. динамическое значение: —")
         self.result_kd_var.set("Коэффициент динамичности: —")
@@ -296,13 +296,14 @@ class TensogramApp(tk.Tk):
             fs = core.sampling_rate(self.ts_segment)
             duration = self.ts_segment[-1] - self.ts_segment[0]
             f1 = core.detect_first_mode_frequency(vz, fs, duration)
+            cutoff = core.suggest_cutoff_frequency(vz, fs, duration)
         except core.TensogramError as exc:
             messagebox.showerror("Ошибка", str(exc))
             return
-        self.cutoff_var.set(f"{f1 * 1.6:.4f}")
-        self.neighborhood_var.set(f"{max(1.0 / f1, 1.0):.3f}")
+        self.cutoff_var.set(f"{cutoff:.4f}")
         self.status_var.set(
-            f"Автоопределение: частота первой формы ~{f1:.4f} Гц (период ~{1/f1:.2f} с)."
+            f"Автоопределение: частота первой формы ~{f1:.4f} Гц (период ~{1/f1:.2f} с), "
+            f"частота среза ~{cutoff:.4f} Гц."
         )
 
     def on_analyze(self) -> None:
