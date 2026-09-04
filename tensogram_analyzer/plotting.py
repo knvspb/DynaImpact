@@ -21,14 +21,15 @@ def draw_full_record(ax, t: np.ndarray, v: np.ndarray) -> None:
     ax.grid(True, alpha=0.3)
 
 
-def draw_segment_preview(ax, ts: np.ndarray, vs: np.ndarray, event_time: float) -> None:
+def draw_segment_preview(ax, ts: np.ndarray, vs: np.ndarray, event_time: float | None = None) -> None:
     ax.plot(ts, vs, linewidth=1.0, color="tab:blue")
-    ax.axvline(event_time, color="tab:red", linestyle="--", linewidth=1, label="событие")
+    if event_time is not None:
+        ax.axvline(event_time, color="tab:red", linestyle="--", linewidth=1, label="событие")
+        ax.legend(loc="best")
     ax.set_title("Выбранный участок тензограммы")
     ax.set_xlabel("Время, с")
     ax.set_ylabel("Величина")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
 
 
 def _draw_static_dynamic(

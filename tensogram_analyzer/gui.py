@@ -55,6 +55,8 @@ class TensogramApp(tk.Tk):
         self.last_spectral: core.SpectralResult | None = None
 
         self.span_selector: SpanSelector | None = None
+        self._selection_patch = None
+        self._stage1_showing_full = False
 
         self._build_widgets()
 
@@ -89,6 +91,8 @@ class TensogramApp(tk.Tk):
         self._build_stage1(self.tab1)
         self._build_stage2(self.tab2)
 
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
         self.status_var = tk.StringVar(value="Откройте файл тензограммы.")
         status_bar = ttk.Label(self, textvariable=self.status_var, anchor="w", relief=tk.SUNKEN)
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
@@ -114,21 +118,47 @@ class TensogramApp(tk.Tk):
         row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X, pady=4)
 
-        ttk.Label(row1, text="Время события, с:").grid(row=0, column=0, sticky="w", padx=4)
+        ttk.Label(row1, text="а) время события, с:").grid(row=0, column=0, sticky="w", padx=4)
         self.event_time_var = tk.StringVar(value="")
         ttk.Entry(row1, textvariable=self.event_time_var, width=12).grid(row=0, column=1, padx=4)
 
-        ttk.Label(row1, text="Окно до, с:").grid(row=0, column=2, sticky="w", padx=4)
+        ttk.Label(row1, text="окно до, с:").grid(row=0, column=2, sticky="w", padx=4)
         self.before_var = tk.StringVar(value="10")
         ttk.Entry(row1, textvariable=self.before_var, width=8).grid(row=0, column=3, padx=4)
 
-        ttk.Label(row1, text="Окно после, с:").grid(row=0, column=4, sticky="w", padx=4)
+        ttk.Label(row1, text="окно после, с:").grid(row=0, column=4, sticky="w", padx=4)
         self.after_var = tk.StringVar(value="10")
         ttk.Entry(row1, textvariable=self.after_var, width=8).grid(row=0, column=5, padx=4)
 
-        ttk.Button(row1, text="Выбрать", command=self.on_select_segment).grid(
-            row=0, column=6, padx=12
+        for var in (self.event_time_var, self.before_var, self.after_var):
+            var.trace_add("write", self._on_convenience_changed)
+
+        row_range = ttk.Frame(parent)
+        row_range.pack(fill=tk.X, pady=4)
+
+        ttk.Label(row_range, text="б) либо протяните мышью по графику — диапазон, с: от").grid(
+            row=0, column=0, sticky="w", padx=4
         )
+        self.range_from_var = tk.StringVar(value="")
+        ttk.Entry(row_range, textvariable=self.range_from_var, width=12).grid(
+            row=0, column=1, padx=4
+        )
+        ttk.Label(row_range, text="до").grid(row=0, column=2, sticky="w", padx=4)
+        self.range_to_var = tk.StringVar(value="")
+        ttk.Entry(row_range, textvariable=self.range_to_var, width=12).grid(
+            row=0, column=3, padx=4
+        )
+
+        for var in (self.range_from_var, self.range_to_var):
+            var.trace_add("write", self._on_range_changed)
+
+        ttk.Button(row_range, text="Выбрать", command=self.on_select_segment).grid(
+            row=0, column=4, padx=12
+        )
+        ttk.Label(
+            row_range,
+            text="— именно этот диапазон используется далее для анализа",
+        ).grid(row=0, column=5, sticky="w", padx=4)
 
     def _build_stage2(self, parent: ttk.Frame) -> None:
         row_id = ttk.Frame(parent)
@@ -241,24 +271,29 @@ class TensogramApp(tk.Tk):
         self.last_spectral = None
         self.save_report_btn.config(state="disabled")
 
-        default_event = t[len(t) // 2]
-        self.event_time_var.set(f"{default_event:.2f}")
-
         self._plot_full_record()
         self._setup_span_selector()
+
+        default_event = t[len(t) // 2]
+        self.event_time_var.set(f"{default_event:.2f}")  # triggers range fields via trace
+
         self.status_var.set(
-            "Файл загружен. Укажите время события и окна до/после, затем нажмите "
-            "'Выбрать', либо включите 'Выбор мышью' и протяните участок на графике."
+            "Файл загружен. Укажите время события и окна до/после, либо включите "
+            "'Выбор мышью' и протяните участок на графике — предполагаемый диапазон "
+            "подсвечивается на графике. Нажмите 'Выбрать', чтобы применить его к анализу."
         )
 
     def _reset_single_axis(self) -> None:
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
+        self._selection_patch = None
 
     def _plot_full_record(self) -> None:
         assert self.t_full is not None and self.v_full is not None
         self._reset_single_axis()
         plotting.draw_full_record(self.ax, self.t_full, self.v_full)
+        self._stage1_showing_full = True
+        self._update_stage1_highlight()
         self.canvas.draw_idle()
 
     def _setup_span_selector(self) -> None:
@@ -271,6 +306,13 @@ class TensogramApp(tk.Tk):
             props=dict(alpha=0.2, facecolor="tab:red"),
         )
         self.span_selector.active = self.mouse_select_var.get()
+
+    def _on_tab_changed(self, _event=None) -> None:
+        if self.t_full is None:
+            return
+        if self.notebook.index(self.notebook.select()) == 0 and not self._stage1_showing_full:
+            self._plot_full_record()
+            self._setup_span_selector()
 
     def on_toggle_mouse_select(self) -> None:
         if self.span_selector is not None:
@@ -293,31 +335,80 @@ class TensogramApp(tk.Tk):
         self.event_time_var.set(f"{event_time:.3f}")
         self.before_var.set(f"{before:.3f}")
         self.after_var.set(f"{after:.3f}")
-        self.on_select_segment()
+        # Точные границы (без промежуточных округлений через событие/окна) —
+        # они являются итоговым диапазоном для анализа.
+        self.range_from_var.set(f"{xmin:.3f}")
+        self.range_to_var.set(f"{xmax:.3f}")
+        self.status_var.set(
+            f"Диапазон выбран мышью: {xmin:.3f} .. {xmax:.3f} с. "
+            "Нажмите 'Выбрать', чтобы применить его к анализу."
+        )
 
-    def _parse_stage1_inputs(self) -> tuple[float, float, float] | None:
+    def _on_convenience_changed(self, *_args) -> None:
+        """Время события + окна до/после -> поля диапазона (одно направление)."""
         try:
             event_time = float(self.event_time_var.get().replace(",", "."))
             before = float(self.before_var.get().replace(",", "."))
             after = float(self.after_var.get().replace(",", "."))
         except ValueError:
+            return
+        self.range_from_var.set(f"{event_time - before:.3f}")
+        self.range_to_var.set(f"{event_time + after:.3f}")
+
+    def _on_range_changed(self, *_args) -> None:
+        self._update_stage1_highlight()
+
+    def _update_stage1_highlight(self) -> None:
+        """Подсвечивает на графике полной записи текущий (ещё не применённый)
+        диапазон, не заменяя сам график — данные не 'обрезаются' до нажатия
+        кнопки 'Выбрать'."""
+        if not self._stage1_showing_full or self.t_full is None:
+            return
+        if self._selection_patch is not None:
+            try:
+                self._selection_patch.remove()
+            except (ValueError, NotImplementedError):
+                pass
+            self._selection_patch = None
+        try:
+            t_from = float(self.range_from_var.get().replace(",", "."))
+            t_to = float(self.range_to_var.get().replace(",", "."))
+        except ValueError:
+            self.canvas.draw_idle()
+            return
+        if t_to > t_from:
+            self._selection_patch = self.ax.axvspan(
+                t_from, t_to, color="tab:red", alpha=0.15, zorder=0
+            )
+        self.canvas.draw_idle()
+
+    def _parse_range_inputs(self) -> tuple[float, float] | None:
+        try:
+            t_from = float(self.range_from_var.get().replace(",", "."))
+            t_to = float(self.range_to_var.get().replace(",", "."))
+        except ValueError:
             messagebox.showerror(
-                "Неверные параметры", "Время события и окна должны быть числами."
+                "Неверные параметры", "Границы диапазона ('от', 'до') должны быть числами."
             )
             return None
-        return event_time, before, after
+        if t_to <= t_from:
+            messagebox.showerror(
+                "Неверные параметры", "Правая граница диапазона должна быть больше левой."
+            )
+            return None
+        return t_from, t_to
 
     def on_select_segment(self) -> None:
         if self.t_full is None:
             messagebox.showwarning("Нет данных", "Сначала откройте файл тензограммы.")
             return
-        params = self._parse_stage1_inputs()
+        params = self._parse_range_inputs()
         if params is None:
             return
-        event_time, before, after = params
+        t_from, t_to = params
 
         try:
-            ts, vs = core.extract_segment(self.t_full, self.v_full, event_time, before, after)
+            ts, vs = core.extract_window(self.t_full, self.v_full, t_from, t_to)
         except core.TensogramError as exc:
             messagebox.showerror("Ошибка выбора участка", str(exc))
             return
@@ -328,7 +419,7 @@ class TensogramApp(tk.Tk):
         self.last_spectral = None
         self.save_report_btn.config(state="disabled")
 
-        self._plot_segment_preview(event_time)
+        self._plot_segment_preview()
 
         self.notebook.tab(self.tab2, state="normal")
         self.notebook.select(self.tab2)
@@ -339,13 +430,15 @@ class TensogramApp(tk.Tk):
         self.result_kd_var.set("Коэффициент динамичности: —")
         self.result_spectral_var.set("Спектральный анализ: —")
         self.status_var.set(
-            "Участок выбран. Настройте параметры расчёта и нажмите 'Анализ'."
+            f"Участок [{t_from:.3f} .. {t_to:.3f}] с выбран. Настройте параметры "
+            "расчёта и нажмите 'Анализ'."
         )
 
-    def _plot_segment_preview(self, event_time: float) -> None:
+    def _plot_segment_preview(self) -> None:
         assert self.ts_segment is not None
         self._reset_single_axis()
-        plotting.draw_segment_preview(self.ax, self.ts_segment, self.vs_segment, event_time)
+        self._stage1_showing_full = False
+        plotting.draw_segment_preview(self.ax, self.ts_segment, self.vs_segment)
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------
