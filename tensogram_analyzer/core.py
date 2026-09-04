@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import butter, filtfilt, detrend
+from scipy.signal import butter, filtfilt, detrend, find_peaks
 
 
 class TensogramError(Exception):
@@ -94,6 +94,20 @@ def extract_segment(
     return t[mask], v[mask]
 
 
+def extract_window(
+    t: np.ndarray, v: np.ndarray, t_start: float, t_end: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Возвращает данные на явно заданном отрезке [t_start, t_end]."""
+    mask = (t >= t_start) & (t <= t_end)
+    if mask.sum() < 4:
+        raise TensogramError(
+            "Недостаточно точек данных на окне "
+            f"[{t_start:.3f} .. {t_end:.3f}] с. Проверьте параметры "
+            f"спектрального анализа и границы записи ({t[0]:.3f} .. {t[-1]:.3f} с)."
+        )
+    return t[mask], v[mask]
+
+
 # --------------------------------------------------------------------------
 # Ноль участка
 # --------------------------------------------------------------------------
@@ -122,6 +136,18 @@ def sampling_rate(ts: np.ndarray) -> float:
     return 1.0 / dt
 
 
+def fft_spectrum(v: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
+    """Амплитудный спектр сигнала (после удаления линейного тренда и
+    оконного взвешивания Ханна). Общий помощник для всех спектральных
+    вычислений в модуле."""
+    n = len(v)
+    v_detrended = detrend(v, type="linear")
+    window = np.hanning(n)
+    spectrum = np.abs(np.fft.rfft(v_detrended * window))
+    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    return freqs, spectrum
+
+
 def detect_first_mode_frequency(
     vz: np.ndarray, fs: float, duration: float, threshold_ratio: float = 0.2
 ) -> float:
@@ -135,10 +161,7 @@ def detect_first_mode_frequency(
     if n < 8 or duration <= 0:
         return 1.0
 
-    vz_detrended = detrend(vz, type="linear")
-    window = np.hanning(n)
-    spectrum = np.abs(np.fft.rfft(vz_detrended * window))
-    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    freqs, spectrum = fft_spectrum(vz, fs)
 
     f_min = 2.0 / duration
     valid = freqs >= f_min
@@ -188,10 +211,7 @@ def suggest_cutoff_frequency(
     if n < 8 or duration <= 0:
         return 1.0
 
-    vz_detrended = detrend(vz, type="linear")
-    window = np.hanning(n)
-    spectrum = np.abs(np.fft.rfft(vz_detrended * window))
-    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    freqs, spectrum = fft_spectrum(vz, fs)
 
     f_min = 2.0 / duration
     valid = freqs >= f_min
@@ -246,6 +266,7 @@ class AnalysisResult:
     dynamic_coefficient: float
 
     ts: np.ndarray
+    vs: np.ndarray  # исходный (не зануленный) сигнал участка
     vz: np.ndarray  # исходный сигнал участка за вычетом нуля
     static_curve: np.ndarray  # выделенная первая форма (статика)
 
@@ -318,6 +339,97 @@ def analyze_segment(
         t_dynamic_max=t_dynamic_max,
         dynamic_coefficient=dynamic_coefficient,
         ts=ts,
+        vs=vs,
         vz=vz,
         static_curve=static_curve,
+    )
+
+
+# --------------------------------------------------------------------------
+# Спектральный анализ (определение частот собственных колебаний)
+# --------------------------------------------------------------------------
+
+DEFAULT_SPECTRAL_DELAY_S = 5.0
+DEFAULT_SPECTRAL_WINDOW_S = 10.0
+
+
+@dataclass
+class SpectralResult:
+    t_start: float
+    t_end: float
+    delay_s: float
+    window_s: float
+
+    ts: np.ndarray
+    vz: np.ndarray  # окно сигнала (за вычетом нуля участка), использованное для БПФ
+
+    freqs: np.ndarray
+    spectrum: np.ndarray
+
+    peak_freqs: np.ndarray
+    peak_amps: np.ndarray
+
+
+def spectral_analysis(
+    t_full: np.ndarray,
+    v_full: np.ndarray,
+    baseline: float,
+    t_reference: float,
+    delay_s: float = DEFAULT_SPECTRAL_DELAY_S,
+    window_s: float = DEFAULT_SPECTRAL_WINDOW_S,
+    n_peaks: int = 5,
+) -> SpectralResult:
+    """Спектральный анализ участка записи для определения частот
+    собственных колебаний конструкции.
+
+    Окно берётся из ПОЛНОЙ записи (а не только из ранее выбранного
+    участка), начиная через `delay_s` секунд после `t_reference`
+    (обычно — момент максимального статического значения) и длиной
+    `window_s` секунд. Такая задержка нужна, чтобы окно спектрального
+    анализа приходилось на свободные колебания конструкции уже после
+    прохода нагрузки, без искажения спектра частотным составом самого
+    воздействия.
+    """
+    if delay_s < 0:
+        raise TensogramError("Задержка от максимума не может быть отрицательной.")
+    if window_s <= 0:
+        raise TensogramError("Длительность окна спектрального анализа должна быть положительной.")
+
+    t_start = t_reference + delay_s
+    t_end = t_start + window_s
+
+    tw, vw = extract_window(t_full, v_full, t_start, t_end)
+    vzw = vw - baseline
+
+    fs = sampling_rate(tw)
+    freqs, spectrum = fft_spectrum(vzw, fs)
+
+    valid = freqs > 0
+    freq_valid = freqs[valid]
+    spec_valid = spectrum[valid]
+
+    if len(spec_valid) == 0:
+        peak_freqs = np.array([])
+        peak_amps = np.array([])
+    else:
+        peak_idx, _ = find_peaks(spec_valid)
+        if len(peak_idx) == 0:
+            peak_idx = np.array([int(np.argmax(spec_valid))])
+        order = np.argsort(spec_valid[peak_idx])[::-1][:n_peaks]
+        chosen = peak_idx[order]
+        sort_by_freq = np.argsort(freq_valid[chosen])
+        peak_freqs = freq_valid[chosen][sort_by_freq]
+        peak_amps = spec_valid[chosen][sort_by_freq]
+
+    return SpectralResult(
+        t_start=t_start,
+        t_end=t_end,
+        delay_s=delay_s,
+        window_s=window_s,
+        ts=tw,
+        vz=vzw,
+        freqs=freqs,
+        spectrum=spectrum,
+        peak_freqs=peak_freqs,
+        peak_amps=peak_amps,
     )

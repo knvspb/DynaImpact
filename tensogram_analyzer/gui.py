@@ -1,19 +1,30 @@
 """Двухэтапный графический интерфейс анализатора тензограмм.
 
 Этап 1 — "Файл и участок":
-    * загрузка файла тензограммы, отображение записи целиком;
-    * ввод параметров участка (время события, окно до/после);
+    * загрузка файла тензограммы, отображение записи целиком (масштаб
+      и панорамирование — стандартной панелью инструментов matplotlib);
+    * выбор участка — вручную (время события + окна до/после) или
+      протяжкой мыши прямо по графику записи (чекбокс "Выбор мышью");
     * кнопка "Выбрать" — показывает выбранный участок в увеличенном
       масштабе для визуальной проверки.
 
 Этап 2 — "Анализ":
+    * название точки расчёта и комментарий — для идентификации;
     * настройка параметров расчёта (длительность "нулевого" участка,
       частота среза первой формы, ширина окрестности поиска динамики);
-    * кнопка "Анализ" — расчёт и отображение результатов с графиком.
+    * настройка спектрального анализа (задержка от максимума и
+      длительность окна) — для определения частот собственных
+      колебаний по свободным колебаниям после прохода нагрузки;
+    * кнопка "Анализ" — расчёт и отображение результатов на сетке из
+      4 графиков (обзор, увеличенный вид, окно и спектр);
+    * кнопка "Сохранить отчёт" — сохраняет PDF-отчёт, CSV со значениями
+      и рядами данных и PNG-изображения графиков в подпапку с названием
+      точки расчёта.
 """
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -21,16 +32,17 @@ import numpy as np
 import PIL._tkinter_finder  # noqa: F401  (нужен PyInstaller для сборки exe)
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from matplotlib.widgets import SpanSelector
 
-from . import core
+from . import core, plotting, report
 
 
 class TensogramApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Анализатор тензограмм")
-        self.geometry("1100x780")
-        self.minsize(900, 650)
+        self.geometry("1150x860")
+        self.minsize(950, 700)
 
         self.t_full: np.ndarray | None = None
         self.v_full: np.ndarray | None = None
@@ -38,6 +50,11 @@ class TensogramApp(tk.Tk):
 
         self.ts_segment: np.ndarray | None = None
         self.vs_segment: np.ndarray | None = None
+
+        self.last_result: core.AnalysisResult | None = None
+        self.last_spectral: core.SpectralResult | None = None
+
+        self.span_selector: SpanSelector | None = None
 
         self._build_widgets()
 
@@ -52,7 +69,7 @@ class TensogramApp(tk.Tk):
         plot_frame = ttk.Frame(container)
         plot_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
 
-        self.figure = Figure(figsize=(9, 4.5), dpi=100)
+        self.figure = Figure(figsize=(9, 5.5), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.figure, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -83,6 +100,17 @@ class TensogramApp(tk.Tk):
         self.file_label_var = tk.StringVar(value="Файл не выбран")
         ttk.Label(row0, textvariable=self.file_label_var).pack(side=tk.LEFT, padx=10)
 
+        row_mouse = ttk.Frame(parent)
+        row_mouse.pack(fill=tk.X, pady=2)
+        self.mouse_select_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row_mouse,
+            text="Выбор мышью на графике (протянуть по горизонтали; для масштабирования/"
+            "панорамирования сначала снимите этот флажок)",
+            variable=self.mouse_select_var,
+            command=self.on_toggle_mouse_select,
+        ).pack(side=tk.LEFT)
+
         row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X, pady=4)
 
@@ -103,6 +131,17 @@ class TensogramApp(tk.Tk):
         )
 
     def _build_stage2(self, parent: ttk.Frame) -> None:
+        row_id = ttk.Frame(parent)
+        row_id.pack(fill=tk.X, pady=4)
+        ttk.Label(row_id, text="Название точки расчёта:").grid(row=0, column=0, sticky="nw", padx=4)
+        self.point_name_var = tk.StringVar(value="")
+        ttk.Entry(row_id, textvariable=self.point_name_var, width=30).grid(
+            row=0, column=1, sticky="w", padx=4
+        )
+        ttk.Label(row_id, text="Комментарий:").grid(row=0, column=2, sticky="nw", padx=4)
+        self.comment_text = tk.Text(row_id, width=40, height=2)
+        self.comment_text.grid(row=0, column=3, sticky="w", padx=4)
+
         row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X, pady=4)
 
@@ -125,9 +164,27 @@ class TensogramApp(tk.Tk):
         self.neighborhood_var = tk.StringVar(value="1")
         ttk.Entry(row1, textvariable=self.neighborhood_var, width=8).grid(row=0, column=6, padx=4)
 
+        row_spec = ttk.Frame(parent)
+        row_spec.pack(fill=tk.X, pady=4)
+        ttk.Label(row_spec, text="Спектральный анализ — задержка от максимума, с:").grid(
+            row=0, column=0, sticky="w", padx=4
+        )
+        self.spec_delay_var = tk.StringVar(value=str(core.DEFAULT_SPECTRAL_DELAY_S))
+        ttk.Entry(row_spec, textvariable=self.spec_delay_var, width=8).grid(row=0, column=1, padx=4)
+
+        ttk.Label(row_spec, text="Длительность окна спектра, с:").grid(
+            row=0, column=2, sticky="w", padx=4
+        )
+        self.spec_window_var = tk.StringVar(value=str(core.DEFAULT_SPECTRAL_WINDOW_S))
+        ttk.Entry(row_spec, textvariable=self.spec_window_var, width=8).grid(row=0, column=3, padx=4)
+
         row2 = ttk.Frame(parent)
         row2.pack(fill=tk.X, pady=4)
         ttk.Button(row2, text="Анализ", command=self.on_analyze).pack(side=tk.LEFT)
+        self.save_report_btn = ttk.Button(
+            row2, text="Сохранить отчёт...", command=self.on_save_report, state="disabled"
+        )
+        self.save_report_btn.pack(side=tk.LEFT, padx=10)
 
         results = ttk.LabelFrame(parent, text="Результаты")
         results.pack(fill=tk.X, pady=6)
@@ -135,16 +192,17 @@ class TensogramApp(tk.Tk):
         self.result_static_var = tk.StringVar(value="Макс. статическое значение: —")
         self.result_dynamic_var = tk.StringVar(value="Макс. динамическое значение: —")
         self.result_kd_var = tk.StringVar(value="Коэффициент динамичности: —")
+        self.result_spectral_var = tk.StringVar(value="Спектральный анализ: —")
 
-        ttk.Label(results, textvariable=self.result_static_var, font=("TkDefaultFont", 10, "bold")).pack(
-            anchor="w", padx=6, pady=2
-        )
-        ttk.Label(results, textvariable=self.result_dynamic_var, font=("TkDefaultFont", 10, "bold")).pack(
-            anchor="w", padx=6, pady=2
-        )
-        ttk.Label(results, textvariable=self.result_kd_var, font=("TkDefaultFont", 10, "bold")).pack(
-            anchor="w", padx=6, pady=2
-        )
+        for var in (
+            self.result_static_var,
+            self.result_dynamic_var,
+            self.result_kd_var,
+            self.result_spectral_var,
+        ):
+            ttk.Label(results, textvariable=var, font=("TkDefaultFont", 10, "bold")).pack(
+                anchor="w", padx=6, pady=2
+            )
 
     # ------------------------------------------------------------------
     # Stage 1 handlers
@@ -175,13 +233,18 @@ class TensogramApp(tk.Tk):
         self.notebook.tab(self.tab2, state="disabled")
         self.ts_segment = None
         self.vs_segment = None
+        self.last_result = None
+        self.last_spectral = None
+        self.save_report_btn.config(state="disabled")
 
         default_event = t[len(t) // 2]
         self.event_time_var.set(f"{default_event:.2f}")
 
         self._plot_full_record()
+        self._setup_span_selector()
         self.status_var.set(
-            "Файл загружен. Укажите время события и окна до/после, затем нажмите 'Выбрать'."
+            "Файл загружен. Укажите время события и окна до/после, затем нажмите "
+            "'Выбрать', либо включите 'Выбор мышью' и протяните участок на графике."
         )
 
     def _reset_single_axis(self) -> None:
@@ -191,12 +254,42 @@ class TensogramApp(tk.Tk):
     def _plot_full_record(self) -> None:
         assert self.t_full is not None and self.v_full is not None
         self._reset_single_axis()
-        self.ax.plot(self.t_full, self.v_full, linewidth=0.6, color="tab:blue")
-        self.ax.set_title("Тензограмма (вся запись)")
-        self.ax.set_xlabel("Время, с")
-        self.ax.set_ylabel("Величина")
-        self.ax.grid(True, alpha=0.3)
+        plotting.draw_full_record(self.ax, self.t_full, self.v_full)
         self.canvas.draw_idle()
+
+    def _setup_span_selector(self) -> None:
+        self.span_selector = SpanSelector(
+            self.ax,
+            self._on_span_select,
+            direction="horizontal",
+            useblit=True,
+            interactive=False,
+            props=dict(alpha=0.2, facecolor="tab:red"),
+        )
+        self.span_selector.active = self.mouse_select_var.get()
+
+    def on_toggle_mouse_select(self) -> None:
+        if self.span_selector is not None:
+            self.span_selector.active = self.mouse_select_var.get()
+        if self.mouse_select_var.get():
+            self.status_var.set(
+                "Режим выбора мышью включён: протяните область на графике полной записи."
+            )
+        else:
+            self.status_var.set(
+                "Режим выбора мышью выключен: доступны масштабирование и панорамирование."
+            )
+
+    def _on_span_select(self, xmin: float, xmax: float) -> None:
+        if self.t_full is None or xmax <= xmin:
+            return
+        event_time = 0.5 * (xmin + xmax)
+        before = event_time - xmin
+        after = xmax - event_time
+        self.event_time_var.set(f"{event_time:.3f}")
+        self.before_var.set(f"{before:.3f}")
+        self.after_var.set(f"{after:.3f}")
+        self.on_select_segment()
 
     def _parse_stage1_inputs(self) -> tuple[float, float, float] | None:
         try:
@@ -227,6 +320,9 @@ class TensogramApp(tk.Tk):
 
         self.ts_segment = ts
         self.vs_segment = vs
+        self.last_result = None
+        self.last_spectral = None
+        self.save_report_btn.config(state="disabled")
 
         self._plot_segment_preview(event_time)
 
@@ -237,6 +333,7 @@ class TensogramApp(tk.Tk):
         self.result_static_var.set("Макс. статическое значение: —")
         self.result_dynamic_var.set("Макс. динамическое значение: —")
         self.result_kd_var.set("Коэффициент динамичности: —")
+        self.result_spectral_var.set("Спектральный анализ: —")
         self.status_var.set(
             "Участок выбран. Настройте параметры расчёта и нажмите 'Анализ'."
         )
@@ -244,19 +341,15 @@ class TensogramApp(tk.Tk):
     def _plot_segment_preview(self, event_time: float) -> None:
         assert self.ts_segment is not None
         self._reset_single_axis()
-        self.ax.plot(self.ts_segment, self.vs_segment, linewidth=1.0, color="tab:blue")
-        self.ax.axvline(event_time, color="tab:red", linestyle="--", linewidth=1, label="событие")
-        self.ax.set_title("Выбранный участок тензограммы")
-        self.ax.set_xlabel("Время, с")
-        self.ax.set_ylabel("Величина")
-        self.ax.grid(True, alpha=0.3)
-        self.ax.legend(loc="best")
+        plotting.draw_segment_preview(self.ax, self.ts_segment, self.vs_segment, event_time)
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Stage 2 handlers
     # ------------------------------------------------------------------
-    def _parse_stage2_inputs(self) -> tuple[float, float | None, float | None] | None:
+    def _parse_stage2_inputs(
+        self,
+    ) -> tuple[float, float | None, float | None, float, float] | None:
         try:
             baseline_dur = float(self.baseline_dur_var.get().replace(",", "."))
         except ValueError:
@@ -281,7 +374,17 @@ class TensogramApp(tk.Tk):
                 messagebox.showerror("Неверные параметры", "Окрестность должна быть числом.")
                 return None
 
-        return baseline_dur, cutoff_hz, neighborhood_s
+        try:
+            spec_delay = float(self.spec_delay_var.get().replace(",", "."))
+            spec_window = float(self.spec_window_var.get().replace(",", "."))
+        except ValueError:
+            messagebox.showerror(
+                "Неверные параметры",
+                "Параметры спектрального анализа (задержка, длительность окна) должны быть числами.",
+            )
+            return None
+
+        return baseline_dur, cutoff_hz, neighborhood_s, spec_delay, spec_window
 
     def on_auto_cutoff(self) -> None:
         if self.ts_segment is None:
@@ -289,7 +392,7 @@ class TensogramApp(tk.Tk):
         params = self._parse_stage2_inputs()
         if params is None:
             return
-        baseline_dur, _cutoff_hz, _neigh = params
+        baseline_dur, _cutoff_hz, _neigh, _delay, _window = params
         try:
             baseline = core.segment_baseline(self.ts_segment, self.vs_segment, baseline_dur)
             vz = self.vs_segment - baseline
@@ -313,7 +416,7 @@ class TensogramApp(tk.Tk):
         params = self._parse_stage2_inputs()
         if params is None:
             return
-        baseline_dur, cutoff_hz, neighborhood_s = params
+        baseline_dur, cutoff_hz, neighborhood_s, spec_delay, spec_window = params
 
         try:
             result = core.analyze_segment(
@@ -327,6 +430,27 @@ class TensogramApp(tk.Tk):
             messagebox.showerror("Ошибка анализа", str(exc))
             return
 
+        spectral: core.SpectralResult | None = None
+        try:
+            spectral = core.spectral_analysis(
+                self.t_full,
+                self.v_full,
+                result.baseline,
+                result.t_static_max,
+                delay_s=spec_delay,
+                window_s=spec_window,
+            )
+        except core.TensogramError as exc:
+            messagebox.showwarning(
+                "Спектральный анализ",
+                f"Не удалось выполнить спектральный анализ: {exc}\n"
+                "Основной расчёт (статика/динамика) выполнен успешно.",
+            )
+
+        self.last_result = result
+        self.last_spectral = spectral
+        self.save_report_btn.config(state="normal")
+
         self.result_static_var.set(
             f"Макс. статическое значение: {result.static_max:.4f}  "
             f"(t = {result.t_static_max:.3f} с)"
@@ -338,69 +462,52 @@ class TensogramApp(tk.Tk):
         self.result_kd_var.set(
             f"Коэффициент динамичности: {result.dynamic_coefficient:.4f}"
         )
+        if spectral is not None and len(spectral.peak_freqs) > 0:
+            freqs_txt = ", ".join(f"{f:.3f}" for f in spectral.peak_freqs)
+            self.result_spectral_var.set(f"Спектральный анализ — частоты, Гц: {freqs_txt}")
+        else:
+            self.result_spectral_var.set("Спектральный анализ: не выполнен")
+
         if not self.cutoff_var.get().strip():
             self.cutoff_var.set(f"{result.cutoff_hz:.4f}")
         if not self.neighborhood_var.get().strip():
             self.neighborhood_var.set(f"{result.neighborhood_s:.3f}")
 
-        self._plot_result(result)
+        plotting.draw_results_grid(self.figure, result, spectral)
+        self.canvas.draw_idle()
         self.status_var.set(
             f"Расчёт выполнен. Ноль участка = {result.baseline:.4f}; "
             f"частота 1-й формы = {result.first_mode_freq:.4f} Гц "
             f"(период {result.first_mode_period:.2f} с)."
         )
 
-    def _plot_result(self, result: core.AnalysisResult) -> None:
-        self.figure.clear()
-        ax_overview = self.figure.add_subplot(211)
-        ax_zoom = self.figure.add_subplot(212)
-        self.ax = ax_overview
+    def on_save_report(self) -> None:
+        if self.last_result is None:
+            messagebox.showwarning("Нет результата", "Сначала выполните анализ.")
+            return
 
-        def _draw(ax, ts, vz, static_curve, title):
-            ax.plot(ts, vz, linewidth=0.8, color="tab:blue", label="сигнал (динамика, за вычетом нуля)")
-            ax.plot(
-                ts, static_curve, linewidth=1.8, color="tab:orange",
-                label="1-я форма (квазистатика)",
-            )
-            ax.axvspan(
-                result.t_static_max - result.neighborhood_s,
-                result.t_static_max + result.neighborhood_s,
-                color="tab:green", alpha=0.12, label="окрестность поиска динамики",
-            )
-            ax.plot(
-                [result.t_static_max], [result.static_max], "o", color="tab:orange",
-                markersize=9, zorder=5, label="макс. статическое",
-            )
-            ax.plot(
-                [result.t_dynamic_max], [result.dynamic_max], "^", color="tab:red",
-                markersize=10, zorder=5, label="макс. динамическое",
-            )
-            ax.set_title(title)
-            ax.set_xlabel("Время, с")
-            ax.set_ylabel("Величина (от нуля участка)")
-            ax.grid(True, alpha=0.3)
+        point_name = self.point_name_var.get().strip()
+        comment = self.comment_text.get("1.0", "end").strip()
 
-        # Верхний график: весь участок целиком.
-        _draw(ax_overview, result.ts, result.vz, result.static_curve, "Весь участок: динамика и 1-я форма (статика)")
-        ax_overview.legend(loc="best", fontsize=8)
+        initial_dir = os.path.dirname(self.file_path) if self.file_path else None
 
-        # Нижний график: увеличенный вид вокруг статического/динамического
-        # максимума — для визуальной проверки корректности значений.
-        half_span = max(result.neighborhood_s * 2.5, result.first_mode_period * 0.75, 1.0)
-        t_center = result.t_static_max
-        mask = np.abs(result.ts - t_center) <= half_span
-        if mask.sum() < 4:
-            mask = np.ones_like(result.ts, dtype=bool)
-        _draw(
-            ax_zoom,
-            result.ts[mask],
-            result.vz[mask],
-            result.static_curve[mask],
-            "Увеличенный вид: проверка максимумов",
+        base_dir = filedialog.askdirectory(
+            title="Выберите папку, в которой будет создана подпапка с отчётом",
+            initialdir=initial_dir,
         )
+        if not base_dir:
+            return
 
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
+        try:
+            out_dir = report.save_report(
+                base_dir, point_name, comment, self.last_result, self.last_spectral
+            )
+        except OSError as exc:
+            messagebox.showerror("Ошибка сохранения", f"Не удалось сохранить отчёт:\n{exc}")
+            return
+
+        self.status_var.set(f"Отчёт сохранён в: {out_dir}")
+        messagebox.showinfo("Отчёт сохранён", f"Отчёт сохранён в папку:\n{out_dir}")
 
 
 def main() -> None:
