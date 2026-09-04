@@ -104,6 +104,25 @@ class TensogramApp(tk.Tk):
         self.file_label_var = tk.StringVar(value="Файл не выбран")
         ttk.Label(row0, textvariable=self.file_label_var).pack(side=tk.LEFT, padx=10)
 
+        row_nodata = ttk.Frame(parent)
+        row_nodata.pack(fill=tk.X, pady=2)
+        self.exclude_no_data_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row_nodata,
+            text="Не отображать участки без записи (значение ≡ 0) длительностью от, с:",
+            variable=self.exclude_no_data_var,
+            command=self.on_toggle_exclude_no_data,
+        ).pack(side=tk.LEFT)
+        self.exclude_no_data_min_dur_var = tk.StringVar(value=str(core.DEFAULT_NO_DATA_MIN_DURATION_S))
+        ttk.Entry(row_nodata, textvariable=self.exclude_no_data_min_dur_var, width=6).pack(
+            side=tk.LEFT, padx=4
+        )
+        self.exclude_no_data_min_dur_var.trace_add("write", self._on_exclude_no_data_param_changed)
+        ttk.Label(
+            row_nodata,
+            text="(только для отображения; на данные и расчёт не влияет)",
+        ).pack(side=tk.LEFT, padx=6)
+
         row_mouse = ttk.Frame(parent)
         row_mouse.pack(fill=tk.X, pady=2)
         self.mouse_select_var = tk.BooleanVar(value=False)
@@ -288,13 +307,32 @@ class TensogramApp(tk.Tk):
         self.ax = self.figure.add_subplot(111)
         self._selection_patch = None
 
+    def _get_display_v_full(self) -> np.ndarray:
+        assert self.v_full is not None
+        if not self.exclude_no_data_var.get():
+            return self.v_full
+        try:
+            min_dur = float(self.exclude_no_data_min_dur_var.get().replace(",", "."))
+        except ValueError:
+            min_dur = core.DEFAULT_NO_DATA_MIN_DURATION_S
+        return core.mask_no_data_runs(self.t_full, self.v_full, min_duration_s=min_dur)
+
     def _plot_full_record(self) -> None:
         assert self.t_full is not None and self.v_full is not None
         self._reset_single_axis()
-        plotting.draw_full_record(self.ax, self.t_full, self.v_full)
+        plotting.draw_full_record(self.ax, self.t_full, self._get_display_v_full())
         self._stage1_showing_full = True
         self._update_stage1_highlight()
         self.canvas.draw_idle()
+
+    def on_toggle_exclude_no_data(self) -> None:
+        if self.t_full is not None and self._stage1_showing_full:
+            self._plot_full_record()
+            self._setup_span_selector()
+
+    def _on_exclude_no_data_param_changed(self, *_args) -> None:
+        if self.exclude_no_data_var.get():
+            self.on_toggle_exclude_no_data()
 
     def _setup_span_selector(self) -> None:
         self.span_selector = SpanSelector(
