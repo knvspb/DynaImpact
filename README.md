@@ -177,10 +177,31 @@ build_exe.bat
 
 ```cmd
 pip install -r requirements.txt
-python -m PyInstaller --onefile --windowed --name TensogramAnalyzer main.py
+python -m PyInstaller --onefile --windowed --name TensogramAnalyzer ^
+    --hidden-import PIL._tkinter_finder ^
+    --hidden-import scipy._external.array_api_compat.numpy.fft ^
+    --hidden-import scipy._external.array_api_compat.numpy.linalg ^
+    --hidden-import scipy._lib.array_api_compat.numpy.fft ^
+    --hidden-import scipy._lib.array_api_compat.numpy.linalg ^
+    main.py
 ```
 
 Готовый файл появится в `dist\TensogramAnalyzer.exe`.
+
+### Устранение неполадок сборки
+
+**`ModuleNotFoundError: No module named 'scipy._external.array_api_compat.numpy.fft'`**
+(или похожая ошибка с `scipy._lib.array_api_compat...`) при запуске
+собранного .exe — новые версии scipy подгружают этот подмодуль
+динамически (строкой, а не обычным `import`), и без явного
+`--hidden-import` старые версии PyInstaller не включают его в сборку.
+`build_exe.bat` уже содержит нужные флаги; если ошибка всё равно
+возникла — вероятно, использовалась старая версия `build_exe.bat` или
+ручная команда без этих флагов. Решение: обновить `build_exe.bat` до
+актуальной версии из репозитория (или добавить указанные выше
+`--hidden-import`) и пересобрать; заодно не помешает обновить сам
+PyInstaller (`pip install --upgrade pyinstaller`) — начиная с
+определённой версии он умеет определять этот импорт сам.
 
 ## Метод расчёта
 
