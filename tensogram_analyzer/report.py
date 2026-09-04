@@ -42,7 +42,7 @@ def _summary_rows(
         ("Время максимального статического значения, с", f"{result.t_static_max:.6g}"),
         ("Максимальное динамическое значение", f"{result.dynamic_max:.6g}"),
         ("Время максимального динамического значения, с", f"{result.t_dynamic_max:.6g}"),
-        ("Коэффициент динамичности", f"{result.dynamic_coefficient:.6g}"),
+        ("Динамический коэффициент", f"{result.dynamic_coefficient:.6g}"),
     ]
     if spectral is not None:
         rows += [

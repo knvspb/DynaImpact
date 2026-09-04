@@ -74,21 +74,50 @@ def draw_overview(
         ax.legend(loc="best", fontsize=8)
 
 
-def draw_zoom(ax, result: core.AnalysisResult, spectral: core.SpectralResult | None = None) -> None:
-    half_span = max(result.neighborhood_s * 2.5, result.first_mode_period * 0.75, 1.0)
-    t_center = result.t_static_max
-    if spectral is not None:
-        # Расширяем видимую область, чтобы окно спектрального анализа
-        # (которое может начинаться заметно позже максимума) было видно.
-        t_center = 0.5 * (result.t_static_max + spectral.t_end)
-        half_span = max(half_span, 0.5 * (spectral.t_end - result.t_static_max) + 1.0)
-    mask = np.abs(result.ts - t_center) <= half_span
+def _find_zero_crossing_bounds(ts: np.ndarray, curve: np.ndarray, i_peak: int) -> tuple[int, int]:
+    """От индекса пика ищет ближайшие пересечения нуля слева и справа —
+    границы "горба" статического воздействия (от нуля до нуля)."""
+    n = len(curve)
+    sign_peak = 1.0 if curve[i_peak] >= 0 else -1.0
+
+    i_left = i_peak
+    while i_left > 0 and np.sign(curve[i_left - 1]) == sign_peak:
+        i_left -= 1
+
+    i_right = i_peak
+    while i_right < n - 1 and np.sign(curve[i_right + 1]) == sign_peak:
+        i_right += 1
+
+    return i_left, i_right
+
+
+def draw_zoom(ax, result: core.AnalysisResult) -> None:
+    """Увеличенный вид: фрагмент "от нуля до нуля" — от точки, где
+    квазистатическая (первая форма) кривая уходит от нуля, до точки,
+    где она возвращается к нулю, то есть весь "горб" статического
+    воздействия целиком, с запасом сопоставления статического и
+    динамического максимумов (это единственная задача этого вида —
+    окно спектрального анализа показывают отдельные графики, и
+    растягивать этот вид ради него не нужно)."""
+    i_peak = int(np.argmin(np.abs(result.ts - result.t_static_max)))
+    i_left, i_right = _find_zero_crossing_bounds(result.ts, result.static_curve, i_peak)
+    t_left, t_right = result.ts[i_left], result.ts[i_right]
+
+    # Небольшой запас по краям, чтобы нулевые точки не упирались в рамку
+    # графика, плюс гарантия, что окрестность поиска динамики видна целиком.
+    span = max(t_right - t_left, 2 * result.neighborhood_s, 1.0)
+    pad = 0.12 * span
+    t_left = min(t_left, result.t_dynamic_max - result.neighborhood_s) - pad
+    t_right = max(t_right, result.t_dynamic_max + result.neighborhood_s) + pad
+
+    mask = (result.ts >= t_left) & (result.ts <= t_right)
     if mask.sum() < 4:
         mask = np.ones_like(result.ts, dtype=bool)
     _draw_static_dynamic(
         ax, result.ts[mask], result.vz[mask], result.static_curve[mask], result,
-        "Увеличенный вид: проверка максимумов", spectral=spectral,
+        "Увеличенный вид: фрагмент от нуля до нуля",
     )
+    ax.set_xlim(t_left, t_right)
 
 
 def draw_spectral_window(ax, spectral: core.SpectralResult) -> None:
@@ -162,7 +191,7 @@ def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.Spectr
     ax_spec_freq = figure.add_subplot(224)
 
     draw_overview(ax_overview, result, spectral=spectral)
-    draw_zoom(ax_zoom, result, spectral=spectral)
+    draw_zoom(ax_zoom, result)
 
     if spectral is not None:
         draw_spectral_window(ax_spec_time, spectral)
@@ -176,4 +205,37 @@ def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.Spectr
             ax.set_xticks([])
             ax.set_yticks([])
 
+    figure.tight_layout()
+
+
+def draw_delay_sweep(figure, results: list[core.SpectralResult]) -> None:
+    """Диаграмма развёртки: для каждой задержки — обнаруженные пиковые
+    частоты спектра, цветом показана амплитуда пика. Устойчивая
+    (не зависящая от задержки) частота выглядит как горизонтальная
+    полоса точек — это и есть частота собственных колебаний
+    конструкции, в отличие от случайных/переходных пиков."""
+    figure.clear()
+    ax = figure.add_subplot(111)
+
+    xs: list[float] = []
+    ys: list[float] = []
+    amps: list[float] = []
+    for res in results:
+        for f, a in zip(res.peak_freqs, res.peak_amps):
+            xs.append(res.delay_s)
+            ys.append(f)
+            amps.append(a)
+
+    if not xs:
+        ax.text(0.5, 0.5, "Нет данных", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+
+    sc = ax.scatter(xs, ys, c=amps, cmap="viridis", s=45, edgecolors="k", linewidths=0.3)
+    figure.colorbar(sc, ax=ax, label="Амплитуда")
+    ax.set_xlabel("Задержка от максимума, с")
+    ax.set_ylabel("Частота пика, Гц")
+    ax.set_title("Развёртка пиков спектра по задержке")
+    ax.grid(True, alpha=0.3)
     figure.tight_layout()

@@ -80,16 +80,20 @@ class TensogramApp(tk.Tk):
 
         # -- bottom: notebook with stage 1 / stage 2 controls ---------
         self.notebook = ttk.Notebook(container)
-        self.notebook.pack(fill=tk.X, side=tk.BOTTOM, padx=8, pady=8)
+        self.notebook.pack(fill=tk.BOTH, expand=True, side=tk.BOTTOM, padx=8, pady=8)
 
         self.tab1 = ttk.Frame(self.notebook)
         self.tab2 = ttk.Frame(self.notebook)
+        self.tab3 = ttk.Frame(self.notebook)
         self.notebook.add(self.tab1, text="1. Файл и участок")
         self.notebook.add(self.tab2, text="2. Анализ")
+        self.notebook.add(self.tab3, text="3. Расширенный спектральный анализ")
         self.notebook.tab(self.tab2, state="disabled")
+        self.notebook.tab(self.tab3, state="disabled")
 
         self._build_stage1(self.tab1)
         self._build_stage2(self.tab2)
+        self._build_stage3(self.tab3)
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -137,7 +141,7 @@ class TensogramApp(tk.Tk):
         row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X, pady=4)
 
-        ttk.Label(row1, text="а) время события, с:").grid(row=0, column=0, sticky="w", padx=4)
+        ttk.Label(row1, text="Время события, с:").grid(row=0, column=0, sticky="w", padx=4)
         self.event_time_var = tk.StringVar(value="")
         ttk.Entry(row1, textvariable=self.event_time_var, width=12).grid(row=0, column=1, padx=4)
 
@@ -155,9 +159,7 @@ class TensogramApp(tk.Tk):
         row_range = ttk.Frame(parent)
         row_range.pack(fill=tk.X, pady=4)
 
-        ttk.Label(row_range, text="б) либо протяните мышью по графику — диапазон, с: от").grid(
-            row=0, column=0, sticky="w", padx=4
-        )
+        ttk.Label(row_range, text="Диапазон, с: от").grid(row=0, column=0, sticky="w", padx=4)
         self.range_from_var = tk.StringVar(value="")
         ttk.Entry(row_range, textvariable=self.range_from_var, width=12).grid(
             row=0, column=1, padx=4
@@ -178,6 +180,20 @@ class TensogramApp(tk.Tk):
             row_range,
             text="— именно этот диапазон используется далее для анализа",
         ).grid(row=0, column=5, sticky="w", padx=4)
+
+        help_text = (
+            "Диапазон можно задать: временем события и окнами до/после (пересчитывает "
+            "поля 'Диапазон' автоматически), протяжкой мышью по графику записи (включите "
+            "флажок 'Выбор мышью' выше — для масштабирования и панорамирования графика "
+            "снимите его), либо вписав границы прямо в поля 'Диапазон'. Любой из способов "
+            "только обновляет поля 'Диапазон' и подсвечивает выбор на графике — сама запись "
+            "не обрезается. Панель инструментов под графиком (лупа, крестик, стрелка назад) "
+            "позволяет увеличивать и перемещаться по записи, чтобы точнее прицелиться перед "
+            "выбором. Данные обрезаются только по нажатию кнопки 'Выбрать'."
+        )
+        ttk.Label(parent, text=help_text, wraplength=1000, justify="left", foreground="#444").pack(
+            fill=tk.X, padx=4, pady=(6, 2)
+        )
 
     def _build_stage2(self, parent: ttk.Frame) -> None:
         row_id = ttk.Frame(parent)
@@ -239,12 +255,15 @@ class TensogramApp(tk.Tk):
         )
         self.save_report_btn.pack(side=tk.LEFT, padx=10)
 
-        results = ttk.LabelFrame(parent, text="Результаты")
-        results.pack(fill=tk.X, pady=6)
+        results_row = ttk.Frame(parent)
+        results_row.pack(fill=tk.X, pady=6)
+
+        results = ttk.LabelFrame(results_row, text="Результаты")
+        results.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
 
         self.result_static_var = tk.StringVar(value="Макс. статическое значение: —")
         self.result_dynamic_var = tk.StringVar(value="Макс. динамическое значение: —")
-        self.result_kd_var = tk.StringVar(value="Коэффициент динамичности: —")
+        self.result_kd_var = tk.StringVar(value="Динамический коэффициент: —")
         self.result_spectral_var = tk.StringVar(value="Спектральный анализ: —")
 
         for var in (
@@ -257,6 +276,91 @@ class TensogramApp(tk.Tk):
                 anchor="w", padx=6, pady=2
             )
 
+        spectral_info = ttk.LabelFrame(results_row, text="Справочная информация")
+        spectral_info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.spectral_info_var = tk.StringVar(
+            value="Метод определения частот и дискретизация спектра появятся после анализа."
+        )
+        ttk.Label(
+            spectral_info, textvariable=self.spectral_info_var, justify="left", anchor="w",
+        ).pack(anchor="w", padx=6, pady=2, fill=tk.X)
+
+    def _build_stage3(self, parent: ttk.Frame) -> None:
+        info = (
+            "Развёртка спектрального анализа по задержке от максимума: при фиксированной "
+            "длине окна для набора задержек (от / до / шаг) определяются пиковые частоты. "
+            "Устойчивая (не зависящая от задержки) частота — это, как правило, частота "
+            "собственных колебаний конструкции, в отличие от случайных/переходных пиков."
+        )
+        ttk.Label(parent, text=info, wraplength=1000, justify="left", foreground="#444").pack(
+            fill=tk.X, padx=4, pady=(4, 6)
+        )
+
+        controls = ttk.Frame(parent)
+        controls.pack(fill=tk.X, pady=4)
+
+        ttk.Label(controls, text="Длина окна, с:").grid(row=0, column=0, sticky="w", padx=4)
+        self.sweep_window_var = tk.StringVar(value=str(core.DEFAULT_SPECTRAL_WINDOW_S))
+        ttk.Entry(controls, textvariable=self.sweep_window_var, width=8).grid(
+            row=0, column=1, padx=4
+        )
+
+        ttk.Label(controls, text="Задержка от, с:").grid(row=0, column=2, sticky="w", padx=4)
+        self.sweep_delay_from_var = tk.StringVar(value="0")
+        ttk.Entry(controls, textvariable=self.sweep_delay_from_var, width=8).grid(
+            row=0, column=3, padx=4
+        )
+
+        ttk.Label(controls, text="до, с:").grid(row=0, column=4, sticky="w", padx=4)
+        self.sweep_delay_to_var = tk.StringVar(value="20")
+        ttk.Entry(controls, textvariable=self.sweep_delay_to_var, width=8).grid(
+            row=0, column=5, padx=4
+        )
+
+        ttk.Label(controls, text="шаг, с:").grid(row=0, column=6, sticky="w", padx=4)
+        self.sweep_delay_step_var = tk.StringVar(value=str(core.DEFAULT_SPECTRAL_SWEEP_STEP_S))
+        ttk.Entry(controls, textvariable=self.sweep_delay_step_var, width=8).grid(
+            row=0, column=7, padx=4
+        )
+
+        ttk.Button(controls, text="Запустить развёртку", command=self.on_run_sweep).grid(
+            row=0, column=8, padx=12
+        )
+
+        self.sweep_status_var = tk.StringVar(value="Развёртка ещё не выполнялась.")
+        ttk.Label(parent, textvariable=self.sweep_status_var).pack(
+            fill=tk.X, padx=4, pady=(0, 4)
+        )
+
+        body = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        table_frame = ttk.Frame(body)
+        columns = ("delay", "p1", "p2", "p3", "p4", "p5")
+        headings = [
+            "Задержка, с", "Пик 1, Гц", "Пик 2, Гц", "Пик 3, Гц", "Пик 4, Гц", "Пик 5, Гц",
+        ]
+        self.sweep_tree = ttk.Treeview(
+            table_frame, columns=columns, show="headings", height=14
+        )
+        for col, heading in zip(columns, headings):
+            self.sweep_tree.heading(col, text=heading)
+            self.sweep_tree.column(col, width=90, anchor="center")
+        tree_scroll = ttk.Scrollbar(
+            table_frame, orient="vertical", command=self.sweep_tree.yview
+        )
+        self.sweep_tree.configure(yscrollcommand=tree_scroll.set)
+        self.sweep_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.LEFT, fill=tk.Y)
+        body.add(table_frame, weight=1)
+
+        plot_frame = ttk.Frame(body)
+        self.sweep_figure = Figure(figsize=(6, 4.5), dpi=100)
+        self.sweep_canvas = FigureCanvasTkAgg(self.sweep_figure, master=plot_frame)
+        self.sweep_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        body.add(plot_frame, weight=2)
+
     # ------------------------------------------------------------------
     # Stage 1 handlers
     # ------------------------------------------------------------------
@@ -264,14 +368,22 @@ class TensogramApp(tk.Tk):
         path = filedialog.askopenfilename(
             title="Выберите файл тензограммы",
             filetypes=[
-                ("Текстовые файлы", "*.txt *.gru *.dat *.csv"),
+                ("Все поддерживаемые", "*.txt *.gru *.dat *.csv *.ana *.anp"),
+                ("Текстовые файлы (время-значение)", "*.txt *.gru *.dat *.csv"),
+                ("Бинарные данные прибора (.ana/.anp)", "*.ana *.anp"),
                 ("Все файлы", "*.*"),
             ],
         )
         if not path:
             return
+
+        is_ana = path.lower().endswith((".ana", ".anp"))
+        anp_comment = None
         try:
-            t, v = core.load_tensogram(path)
+            if is_ana:
+                t, v, anp_comment = core.load_ana_anp(path)
+            else:
+                t, v = core.load_tensogram(path)
         except core.TensogramError as exc:
             messagebox.showerror("Ошибка загрузки", str(exc))
             return
@@ -289,6 +401,10 @@ class TensogramApp(tk.Tk):
         self.last_result = None
         self.last_spectral = None
         self.save_report_btn.config(state="disabled")
+
+        if anp_comment is not None:
+            self.comment_text.delete("1.0", "end")
+            self.comment_text.insert("1.0", anp_comment)
 
         self._plot_full_record()
         self._setup_span_selector()
@@ -465,7 +581,7 @@ class TensogramApp(tk.Tk):
         self.neighborhood_var.set("1")
         self.result_static_var.set("Макс. статическое значение: —")
         self.result_dynamic_var.set("Макс. динамическое значение: —")
-        self.result_kd_var.set("Коэффициент динамичности: —")
+        self.result_kd_var.set("Динамический коэффициент: —")
         self.result_spectral_var.set("Спектральный анализ: —")
         self.status_var.set(
             f"Участок [{t_from:.3f} .. {t_to:.3f}] с выбран. Настройте параметры "
@@ -577,6 +693,7 @@ class TensogramApp(tk.Tk):
         self.last_result = result
         self.last_spectral = spectral
         self.save_report_btn.config(state="normal")
+        self.notebook.tab(self.tab3, state="normal")
 
         self.result_static_var.set(
             f"Макс. статическое значение: {result.static_max:.4f}  "
@@ -587,7 +704,7 @@ class TensogramApp(tk.Tk):
             f"(t = {result.t_dynamic_max:.3f} с)"
         )
         self.result_kd_var.set(
-            f"Коэффициент динамичности: {result.dynamic_coefficient:.4f}"
+            f"Динамический коэффициент: {result.dynamic_coefficient:.4f}"
         )
         self._update_spectral_result_label(spectral)
 
@@ -630,6 +747,23 @@ class TensogramApp(tk.Tk):
         else:
             self.result_spectral_var.set("Спектральный анализ: не выполнен")
 
+        if spectral is not None:
+            fs = core.sampling_rate(spectral.ts)
+            freq_resolution = 1.0 / spectral.window_s
+            self.spectral_info_var.set(
+                "Метод: БПФ амплитудного спектра (удаление линейного тренда, "
+                "окно Ханна)\n"
+                f"Частота дискретизации: {fs:.2f} Гц ({len(spectral.ts)} отсчётов "
+                f"в окне {spectral.window_s:.2f} с)\n"
+                f"Дискретизация по частоте (разрешение спектра): "
+                f"Δf = 1/{spectral.window_s:.2f} с ≈ {freq_resolution:.4f} Гц\n"
+                f"Частота Найквиста: {fs / 2:.2f} Гц"
+            )
+        else:
+            self.spectral_info_var.set(
+                "Метод определения частот и дискретизация спектра появятся после анализа."
+            )
+
     def on_refresh_spectral(self) -> None:
         if self.last_result is None:
             messagebox.showwarning(
@@ -652,6 +786,52 @@ class TensogramApp(tk.Tk):
             self.status_var.set(
                 f"Спектр пересчитан для окна {spectral.t_start:.2f}..{spectral.t_end:.2f} с."
             )
+
+    def on_run_sweep(self) -> None:
+        if self.last_result is None:
+            messagebox.showwarning(
+                "Нет результата", "Сначала выполните основной анализ ('Анализ') на вкладке 2."
+            )
+            return
+        try:
+            window_s = float(self.sweep_window_var.get().replace(",", "."))
+            delay_from = float(self.sweep_delay_from_var.get().replace(",", "."))
+            delay_to = float(self.sweep_delay_to_var.get().replace(",", "."))
+            delay_step = float(self.sweep_delay_step_var.get().replace(",", "."))
+        except ValueError:
+            messagebox.showerror(
+                "Неверные параметры",
+                "Длина окна, задержки 'от'/'до' и шаг должны быть числами.",
+            )
+            return
+
+        try:
+            sweep_results = core.sweep_spectral_delays(
+                self.t_full, self.v_full, self.last_result.baseline, self.last_result.t_static_max,
+                window_s=window_s, delay_start_s=delay_from, delay_end_s=delay_to,
+                delay_step_s=delay_step,
+            )
+        except core.TensogramError as exc:
+            messagebox.showerror("Ошибка развёртки", str(exc))
+            return
+
+        for row in self.sweep_tree.get_children():
+            self.sweep_tree.delete(row)
+        for res in sweep_results:
+            peaks = list(res.peak_freqs[:5])
+            peaks += [None] * (5 - len(peaks))
+            values = [f"{res.delay_s:.3f}"] + [
+                "" if p is None else f"{p:.3f}" for p in peaks
+            ]
+            self.sweep_tree.insert("", "end", values=values)
+
+        plotting.draw_delay_sweep(self.sweep_figure, sweep_results)
+        self.sweep_canvas.draw_idle()
+
+        self.sweep_status_var.set(
+            f"Развёртка выполнена: {len(sweep_results)} задержек от {delay_from:.2f} до "
+            f"{delay_to:.2f} с (шаг {delay_step:.2f} с), окно {window_s:.2f} с."
+        )
 
     def on_save_report(self) -> None:
         if self.last_result is None:

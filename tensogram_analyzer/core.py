@@ -15,11 +15,12 @@
 * В окрестности момента этого статического максимума (ширина окрестности
   задаётся оператором) в НЕФИЛЬТРОВАННОМ (полном) сигнале ищется
   максимальное по модулю значение — МАКСИМАЛЬНОЕ ДИНАМИЧЕСКОЕ значение.
-* Коэффициент динамичности = |динамическое| / |статическое|.
+* Динамический коэффициент = |динамическое| / |статическое|.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -70,6 +71,140 @@ def load_tensogram(path: str) -> tuple[np.ndarray, np.ndarray]:
 
     order = np.argsort(t, kind="mergesort")
     return t[order], v[order]
+
+
+# --------------------------------------------------------------------------
+# Формат .ana + .anp (бинарные данные + текстовый заголовок)
+# --------------------------------------------------------------------------
+
+_ANP_KEY_ORDER = [
+    "COMMENT", "GAIN", "ABSVOLT", "FRQ", "TMI", "FRL", "FRH", "FORMAT",
+    "START", "DATE", "CHANNEL", "MAXLEVEL", "SENSE", "CONVERT", "AMPL",
+    "REFER", "AFCH", "DC", "ID",
+]
+
+_ANP_LABELS = {
+    "COMMENT": "Комментарий прибора",
+    "GAIN": "Коэффициент усиления (GAIN)",
+    "ABSVOLT": "ABSVOLT",
+    "FRQ": "Частота дискретизации, Гц",
+    "FRL": "Фильтр, нижняя частота, Гц",
+    "FRH": "Фильтр, верхняя частота, Гц",
+    "FORMAT": "Формат данных",
+    "START": "Время начала записи",
+    "DATE": "Дата записи",
+    "CHANNEL": "Канал",
+    "MAXLEVEL": "MAXLEVEL",
+    "SENSE": "SENSE",
+    "CONVERT": "Единицы измерения",
+    "AMPL": "AMPL",
+    "ID": "ID канала",
+}
+
+
+def _find_anp_companion(path: str) -> tuple[str, str]:
+    """По пути к .ana или .anp находит пару (путь_к_ana, путь_к_anp)."""
+    base, ext = os.path.splitext(path)
+    ext_low = ext.lower()
+    if ext_low == ".ana":
+        ana_path, anp_path = path, base + ".anp"
+    elif ext_low == ".anp":
+        ana_path, anp_path = base + ".ana", path
+    else:
+        raise TensogramError(
+            "Ожидается файл с расширением .ana или .anp (парный текстовый "
+            "заголовок должен лежать рядом, с тем же именем)."
+        )
+
+    if not os.path.isfile(ana_path):
+        raise TensogramError(f"Не найден файл данных: {os.path.basename(ana_path)}")
+    if not os.path.isfile(anp_path):
+        raise TensogramError(f"Не найден файл заголовка: {os.path.basename(anp_path)}")
+    return ana_path, anp_path
+
+
+def _parse_anp_header(anp_path: str) -> dict:
+    """Разбирает текстовый заголовок .anp.
+
+    Значения полей (в частности CONVERT — единицы измерения) в файлах
+    этого прибора закодированы в Windows-1251, а не в UTF-8.
+    """
+    with open(anp_path, "rb") as fh:
+        raw = fh.read()
+    text = raw.decode("cp1251", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    header: dict = {"title": lines[0] if lines else ""}
+    for line in lines[1:]:
+        parts = line.split(None, 1)
+        key = parts[0].upper()
+        value = parts[1].strip() if len(parts) > 1 else ""
+        header[key] = value
+    return header
+
+
+def _format_anp_comment(header: dict, ana_path: str) -> str:
+    lines = [f"Файл: {os.path.basename(ana_path)}"]
+    if header.get("title"):
+        lines.append(f"Канал/точка: {header['title']}")
+    if header.get("DATE") or header.get("START"):
+        lines.append(f"Начало записи: {header.get('DATE', '')} {header.get('START', '')}".strip())
+    for key in _ANP_KEY_ORDER:
+        if key == "COMMENT":
+            continue
+        if key in header and header[key] not in ("", None) and key not in ("DATE", "START"):
+            label = _ANP_LABELS.get(key, key)
+            value = header[key].replace("\t", "  ")
+            lines.append(f"{label}: {value}")
+    if header.get("COMMENT"):
+        lines.append(f"Комментарий прибора: {header['COMMENT']}")
+    return "\n".join(lines)
+
+
+def load_ana_anp(path: str) -> tuple[np.ndarray, np.ndarray, str]:
+    """Загружает тензограмму из пары файлов .ana (бинарные данные) +
+    .anp (текстовый заголовок с параметрами записи).
+
+    `path` может указывать на любой из двух файлов пары. Данные в .ana
+    (при FORMAT f2, единственном пока опробованном варианте) — это
+    массив чисел float32 (little-endian), уже в инженерных единицах
+    (масштабирование по GAIN/ABSVOLT в прибор уже применено при записи).
+    Частота дискретизации берётся из поля FRQ заголовка.
+
+    Возвращает (время, значение, текст с сопроводительной информацией
+    из заголовка — для отображения оператору, например в комментарии).
+    """
+    ana_path, anp_path = _find_anp_companion(path)
+    header = _parse_anp_header(anp_path)
+
+    fmt = header.get("FORMAT", "").strip().lower()
+    if fmt not in ("f2", "f4", "float", "float32"):
+        raise TensogramError(
+            f"Неподдерживаемый формат данных .ana: FORMAT={header.get('FORMAT')!r}. "
+            "Поддерживается только 32-битный float (FORMAT f2/f4)."
+        )
+
+    try:
+        freq_hz = float(header.get("FRQ", "").split()[0])
+    except (ValueError, IndexError):
+        raise TensogramError("В заголовке .anp не найдена частота дискретизации (FRQ).")
+    if freq_hz <= 0:
+        raise TensogramError("Некорректная частота дискретизации (FRQ) в заголовке .anp.")
+
+    with open(ana_path, "rb") as fh:
+        raw = fh.read()
+    if len(raw) % 4 != 0:
+        raise TensogramError(
+            f"Размер файла {ana_path!r} не кратен 4 байтам — не похоже на массив float32."
+        )
+    v = np.frombuffer(raw, dtype="<f4").astype(float)
+    if len(v) < 4:
+        raise TensogramError("Файл .ana не содержит достаточного количества данных.")
+
+    t = np.arange(len(v)) / freq_hz
+
+    comment = _format_anp_comment(header, ana_path)
+    return t, v, comment
 
 
 DEFAULT_NO_DATA_MIN_DURATION_S = 5.0
@@ -191,14 +326,28 @@ def fft_spectrum(v: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
     return freqs, spectrum
 
 
+MAX_FIRST_MODE_FREQ_HZ = 1.0
+"""Верхняя граница физически правдоподобной частоты первой формы колебаний.
+
+Для реальных сооружений (мостов и т.п.) частота первой (основной) формы
+собственных колебаний практически всегда не превышает 1 Гц; более
+высокочастотные пики в спектре — это либо старшие формы/вибрации, либо
+шум, и не должны приниматься за первую форму, даже если формально
+оказываются самой низкочастотной значимой составляющей на "тихом"
+(слабо нагруженном) участке.
+"""
+
+
 def detect_first_mode_frequency(
     vz: np.ndarray, fs: float, duration: float, threshold_ratio: float = 0.2
 ) -> float:
     """Оценивает частоту первой формы колебаний (наименьшая значимая частота).
 
     Учитываются только частоты, для которых на участке укладывается не
-    менее двух периодов (иначе колебание нельзя достоверно выделить), и
-    амплитуда которых не менее `threshold_ratio` от максимальной в спектре.
+    менее двух периодов (иначе колебание нельзя достоверно выделить),
+    амплитуда которых не менее `threshold_ratio` от максимальной в
+    спектре, и которые не превышают `MAX_FIRST_MODE_FREQ_HZ` (см. её
+    описание — реальная первая форма сооружения не бывает выше ~1 Гц).
     """
     n = len(vz)
     if n < 8 or duration <= 0:
@@ -207,7 +356,11 @@ def detect_first_mode_frequency(
     freqs, spectrum = fft_spectrum(vz, fs)
 
     f_min = 2.0 / duration
-    valid = freqs >= f_min
+    valid = (freqs >= f_min) & (freqs <= MAX_FIRST_MODE_FREQ_HZ)
+    if not valid.any():
+        # Участок короче ~2 с (f_min уже выше предела) — ограничение
+        # неприменимо, используем частоты как есть.
+        valid = freqs >= f_min
     spec_valid = spectrum[valid]
     freq_valid = freqs[valid]
 
@@ -219,6 +372,21 @@ def detect_first_mode_frequency(
     if len(candidates) == 0:
         return float(freq_valid[np.argmax(spec_valid)])
     return float(candidates.min())
+
+
+MAX_CUTOFF_SEARCH_HZ = 3.0
+"""Верхняя граница поиска "провала" в спектре для частоты среза.
+
+На слабо нагруженных ("тихих") участках, где нет выраженной формы
+нагружения, гармоники первой формы могут быть едва заметны на фоне
+шума, и поиск провала способен случайно "уехать" далеко по частоте —
+вплоть до реальных высокочастотных форм/вибраций конструкции (тогда
+частота среза получалась бы завышенной на порядок и более, например
+8-12 Гц вместо ожидаемых для типичного проезда автомобиля ~0.2-0.5 Гц).
+Ограничение поиска разумным диапазоном (первые несколько герц) не даёт
+этому случиться; если в этом диапазоне подходящего провала не нашлось,
+используется запасной вариант `fallback_multiplier * f1`.
+"""
 
 
 def suggest_cutoff_frequency(
@@ -257,7 +425,9 @@ def suggest_cutoff_frequency(
     freqs, spectrum = fft_spectrum(vz, fs)
 
     f_min = 2.0 / duration
-    valid = freqs >= f_min
+    valid = (freqs >= f_min) & (freqs <= MAX_FIRST_MODE_FREQ_HZ)
+    if not valid.any():
+        valid = freqs >= f_min
     if not valid.any() or spectrum[valid].max() <= 0:
         return f_min * fallback_multiplier
 
@@ -267,7 +437,7 @@ def suggest_cutoff_frequency(
 
     threshold = gap_ratio * spectrum[valid].max()
     below_threshold = spectrum < threshold
-    candidate_idx = np.where((freqs > f1) & below_threshold)[0]
+    candidate_idx = np.where((freqs > f1) & (freqs <= MAX_CUTOFF_SEARCH_HZ) & below_threshold)[0]
 
     for i in candidate_idx:
         span_mask = (freqs >= freqs[i]) & (freqs <= freqs[i] + gap_span_hz)
@@ -476,3 +646,56 @@ def spectral_analysis(
         peak_freqs=peak_freqs,
         peak_amps=peak_amps,
     )
+
+
+DEFAULT_SPECTRAL_SWEEP_STEP_S = 0.5
+
+
+def sweep_spectral_delays(
+    t_full: np.ndarray,
+    v_full: np.ndarray,
+    baseline: float,
+    t_reference: float,
+    window_s: float,
+    delay_start_s: float,
+    delay_end_s: float,
+    delay_step_s: float = DEFAULT_SPECTRAL_SWEEP_STEP_S,
+    n_peaks: int = 5,
+) -> list[SpectralResult]:
+    """Выполняет спектральный анализ для набора задержек от `t_reference`
+    (от `delay_start_s` до `delay_end_s` с шагом `delay_step_s`, при
+    фиксированной длине окна `window_s`).
+
+    Полезно для отделения устойчивых частот собственных колебаний
+    конструкции (которые проявляются в спектре стабильно, независимо от
+    того, с какой задержкой после максимума взято окно) от случайных
+    или переходных пиков, характерных лишь для отдельных задержек.
+
+    Окна, выходящие за пределы записи, пропускаются (не прерывают всю
+    развёртку); если ни одна задержка не дала результата, поднимается
+    TensogramError.
+    """
+    if delay_step_s <= 0:
+        raise TensogramError("Шаг изменения задержки должен быть положительным.")
+    if delay_end_s < delay_start_s:
+        raise TensogramError("Конечная задержка не может быть меньше начальной.")
+
+    results: list[SpectralResult] = []
+    n_steps = int(round((delay_end_s - delay_start_s) / delay_step_s))
+    for i in range(n_steps + 1):
+        delay = delay_start_s + i * delay_step_s
+        try:
+            res = spectral_analysis(
+                t_full, v_full, baseline, t_reference,
+                delay_s=delay, window_s=window_s, n_peaks=n_peaks,
+            )
+        except TensogramError:
+            continue
+        results.append(res)
+
+    if not results:
+        raise TensogramError(
+            "Не удалось выполнить развёртку по задержке — окно спектра выходит "
+            "за пределы записи для всех заданных значений задержки."
+        )
+    return results
