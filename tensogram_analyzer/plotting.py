@@ -31,7 +31,10 @@ def draw_segment_preview(ax, ts: np.ndarray, vs: np.ndarray, event_time: float) 
     ax.legend(loc="best")
 
 
-def _draw_static_dynamic(ax, ts, vz, static_curve, result: core.AnalysisResult, title: str) -> None:
+def _draw_static_dynamic(
+    ax, ts, vz, static_curve, result: core.AnalysisResult, title: str,
+    spectral: core.SpectralResult | None = None,
+) -> None:
     ax.plot(ts, vz, linewidth=0.8, color="tab:blue", label="сигнал (динамика, за вычетом нуля)")
     ax.plot(ts, static_curve, linewidth=1.8, color="tab:orange", label="1-я форма (квазистатика)")
     ax.axvspan(
@@ -39,6 +42,11 @@ def _draw_static_dynamic(ax, ts, vz, static_curve, result: core.AnalysisResult, 
         result.t_static_max + result.neighborhood_s,
         color="tab:green", alpha=0.12, label="окрестность поиска динамики",
     )
+    if spectral is not None:
+        ax.axvspan(
+            spectral.t_start, spectral.t_end,
+            color="tab:purple", alpha=0.12, label="окно спектрального анализа",
+        )
     ax.plot(
         [result.t_static_max], [result.static_max], "o", color="tab:orange",
         markersize=9, zorder=5, label="макс. статическое",
@@ -53,24 +61,32 @@ def _draw_static_dynamic(ax, ts, vz, static_curve, result: core.AnalysisResult, 
     ax.grid(True, alpha=0.3)
 
 
-def draw_overview(ax, result: core.AnalysisResult, legend: bool = True) -> None:
+def draw_overview(
+    ax, result: core.AnalysisResult, spectral: core.SpectralResult | None = None,
+    legend: bool = True,
+) -> None:
     _draw_static_dynamic(
         ax, result.ts, result.vz, result.static_curve, result,
-        "Весь участок: динамика и 1-я форма (статика)",
+        "Весь участок: динамика и 1-я форма (статика)", spectral=spectral,
     )
     if legend:
         ax.legend(loc="best", fontsize=8)
 
 
-def draw_zoom(ax, result: core.AnalysisResult) -> None:
+def draw_zoom(ax, result: core.AnalysisResult, spectral: core.SpectralResult | None = None) -> None:
     half_span = max(result.neighborhood_s * 2.5, result.first_mode_period * 0.75, 1.0)
     t_center = result.t_static_max
+    if spectral is not None:
+        # Расширяем видимую область, чтобы окно спектрального анализа
+        # (которое может начинаться заметно позже максимума) было видно.
+        t_center = 0.5 * (result.t_static_max + spectral.t_end)
+        half_span = max(half_span, 0.5 * (spectral.t_end - result.t_static_max) + 1.0)
     mask = np.abs(result.ts - t_center) <= half_span
     if mask.sum() < 4:
         mask = np.ones_like(result.ts, dtype=bool)
     _draw_static_dynamic(
         ax, result.ts[mask], result.vz[mask], result.static_curve[mask], result,
-        "Увеличенный вид: проверка максимумов",
+        "Увеличенный вид: проверка максимумов", spectral=spectral,
     )
 
 
@@ -96,17 +112,44 @@ def draw_spectrum(ax, spectral: core.SpectralResult, max_freq: float | None = No
         max_freq = max(max_freq, 1.0)
     mask = freqs <= max_freq
     ax.plot(freqs[mask], spectrum[mask], linewidth=1.0, color="tab:purple")
-    for f, a in zip(spectral.peak_freqs, spectral.peak_amps):
-        if f <= max_freq:
-            ax.plot([f], [a], "v", color="tab:red", markersize=7)
-            ax.annotate(
-                f"{f:.3f} Гц", (f, a), textcoords="offset points", xytext=(0, 6),
-                ha="center", fontsize=8, color="tab:red",
-            )
+
+    shown = [(f, a) for f, a in zip(spectral.peak_freqs, spectral.peak_amps) if f <= max_freq]
+    for f, a in shown:
+        ax.plot([f], [a], "v", color="tab:red", markersize=7, zorder=5)
+
+    # Подписи частот могут стоять близко друг к другу по оси X (особенно
+    # у соседних пиков одной группы форм) и накладываться. Чтобы этого не
+    # происходило, для каждой подписи подбирается наименьший свободный
+    # "уровень" высоты, на котором она не попадает в min_gap ни от одной
+    # уже размещённой на этом уровне подписи (а не только от соседней).
+    # Сама высота подписи задаётся в ДОЛЯХ ОСИ (а не смещением от точки
+    # пика), иначе при сильно различающихся амплитудах пиков подписи
+    # с разными уровнями могут случайно оказаться на одной и той же
+    # экранной высоте.
+    min_gap = 0.11 * max_freq
+    placed: list[tuple[int, float]] = []
+    for f, _ in shown:
+        level = 0
+        while any(lvl == level and abs(f - pf) < min_gap for lvl, pf in placed):
+            level += 1
+        placed.append((level, f))
+
+    trans = ax.get_xaxis_transform()  # x — данные, y — доля высоты осей
+    top_frac = 0.94
+    step_frac = 0.085
+    for (level, f), (_, a) in zip(placed, shown):
+        ax.text(
+            f, top_frac - level * step_frac, f"{f:.3f}",
+            transform=trans, ha="center", va="top", fontsize=7.5, color="tab:red",
+        )
+
     ax.set_title("Спектр (окно после нагрузки)")
     ax.set_xlabel("Частота, Гц")
     ax.set_ylabel("Амплитуда")
     ax.grid(True, alpha=0.3)
+    if shown:
+        top_amp = max(a for _, a in shown)
+        ax.set_ylim(top=top_amp * 1.15, bottom=min(0.0, ax.get_ylim()[0]))
 
 
 def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.SpectralResult | None) -> None:
@@ -117,8 +160,8 @@ def draw_results_grid(figure, result: core.AnalysisResult, spectral: core.Spectr
     ax_spec_time = figure.add_subplot(223)
     ax_spec_freq = figure.add_subplot(224)
 
-    draw_overview(ax_overview, result)
-    draw_zoom(ax_zoom, result)
+    draw_overview(ax_overview, result, spectral=spectral)
+    draw_zoom(ax_zoom, result, spectral=spectral)
 
     if spectral is not None:
         draw_spectral_window(ax_spec_time, spectral)

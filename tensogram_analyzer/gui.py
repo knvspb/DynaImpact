@@ -178,6 +178,10 @@ class TensogramApp(tk.Tk):
         self.spec_window_var = tk.StringVar(value=str(core.DEFAULT_SPECTRAL_WINDOW_S))
         ttk.Entry(row_spec, textvariable=self.spec_window_var, width=8).grid(row=0, column=3, padx=4)
 
+        ttk.Button(row_spec, text="Обновить", command=self.on_refresh_spectral).grid(
+            row=0, column=4, padx=4
+        )
+
         row2 = ttk.Frame(parent)
         row2.pack(fill=tk.X, pady=4)
         ttk.Button(row2, text="Анализ", command=self.on_analyze).pack(side=tk.LEFT)
@@ -374,6 +378,14 @@ class TensogramApp(tk.Tk):
                 messagebox.showerror("Неверные параметры", "Окрестность должна быть числом.")
                 return None
 
+        spec_params = self._parse_spectral_inputs()
+        if spec_params is None:
+            return None
+        spec_delay, spec_window = spec_params
+
+        return baseline_dur, cutoff_hz, neighborhood_s, spec_delay, spec_window
+
+    def _parse_spectral_inputs(self) -> tuple[float, float] | None:
         try:
             spec_delay = float(self.spec_delay_var.get().replace(",", "."))
             spec_window = float(self.spec_window_var.get().replace(",", "."))
@@ -383,8 +395,7 @@ class TensogramApp(tk.Tk):
                 "Параметры спектрального анализа (задержка, длительность окна) должны быть числами.",
             )
             return None
-
-        return baseline_dur, cutoff_hz, neighborhood_s, spec_delay, spec_window
+        return spec_delay, spec_window
 
     def on_auto_cutoff(self) -> None:
         if self.ts_segment is None:
@@ -430,22 +441,7 @@ class TensogramApp(tk.Tk):
             messagebox.showerror("Ошибка анализа", str(exc))
             return
 
-        spectral: core.SpectralResult | None = None
-        try:
-            spectral = core.spectral_analysis(
-                self.t_full,
-                self.v_full,
-                result.baseline,
-                result.t_static_max,
-                delay_s=spec_delay,
-                window_s=spec_window,
-            )
-        except core.TensogramError as exc:
-            messagebox.showwarning(
-                "Спектральный анализ",
-                f"Не удалось выполнить спектральный анализ: {exc}\n"
-                "Основной расчёт (статика/динамика) выполнен успешно.",
-            )
+        spectral = self._compute_spectral(result, spec_delay, spec_window)
 
         self.last_result = result
         self.last_spectral = spectral
@@ -462,11 +458,7 @@ class TensogramApp(tk.Tk):
         self.result_kd_var.set(
             f"Коэффициент динамичности: {result.dynamic_coefficient:.4f}"
         )
-        if spectral is not None and len(spectral.peak_freqs) > 0:
-            freqs_txt = ", ".join(f"{f:.3f}" for f in spectral.peak_freqs)
-            self.result_spectral_var.set(f"Спектральный анализ — частоты, Гц: {freqs_txt}")
-        else:
-            self.result_spectral_var.set("Спектральный анализ: не выполнен")
+        self._update_spectral_result_label(spectral)
 
         if not self.cutoff_var.get().strip():
             self.cutoff_var.set(f"{result.cutoff_hz:.4f}")
@@ -480,6 +472,55 @@ class TensogramApp(tk.Tk):
             f"частота 1-й формы = {result.first_mode_freq:.4f} Гц "
             f"(период {result.first_mode_period:.2f} с)."
         )
+
+    def _compute_spectral(
+        self, result: core.AnalysisResult, spec_delay: float, spec_window: float
+    ) -> core.SpectralResult | None:
+        try:
+            return core.spectral_analysis(
+                self.t_full,
+                self.v_full,
+                result.baseline,
+                result.t_static_max,
+                delay_s=spec_delay,
+                window_s=spec_window,
+            )
+        except core.TensogramError as exc:
+            messagebox.showwarning(
+                "Спектральный анализ",
+                f"Не удалось выполнить спектральный анализ: {exc}",
+            )
+            return None
+
+    def _update_spectral_result_label(self, spectral: core.SpectralResult | None) -> None:
+        if spectral is not None and len(spectral.peak_freqs) > 0:
+            freqs_txt = ", ".join(f"{f:.3f}" for f in spectral.peak_freqs)
+            self.result_spectral_var.set(f"Спектральный анализ — частоты, Гц: {freqs_txt}")
+        else:
+            self.result_spectral_var.set("Спектральный анализ: не выполнен")
+
+    def on_refresh_spectral(self) -> None:
+        if self.last_result is None:
+            messagebox.showwarning(
+                "Нет результата", "Сначала выполните основной анализ ('Анализ')."
+            )
+            return
+        spec_params = self._parse_spectral_inputs()
+        if spec_params is None:
+            return
+        spec_delay, spec_window = spec_params
+
+        spectral = self._compute_spectral(self.last_result, spec_delay, spec_window)
+        self.last_spectral = spectral
+        self._update_spectral_result_label(spectral)
+
+        plotting.draw_results_grid(self.figure, self.last_result, spectral)
+        self.canvas.draw_idle()
+
+        if spectral is not None:
+            self.status_var.set(
+                f"Спектр пересчитан для окна {spectral.t_start:.2f}..{spectral.t_end:.2f} с."
+            )
 
     def on_save_report(self) -> None:
         if self.last_result is None:
