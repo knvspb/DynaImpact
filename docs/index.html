@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Анализатор тензограмм (веб-версия)</title>
+<link rel="stylesheet" href="style.css">
+<script src="plotly.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>Анализатор тензограмм — веб-версия</h1>
+  <p>
+    Второй вариант приложения (работает прямо в браузере, без установки).
+    Полнофункциональная версия с установкой — Windows-приложение
+    (<a href="https://github.com/knvspb/DynaImpact">исходный код и .exe</a>).
+    Файлы обрабатываются локально в браузере — ничего не отправляется на сервер.
+  </p>
+</header>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="tab1">1. Файл и участок</button>
+  <button class="tab-btn" data-tab="tab2" id="tabBtn2" disabled>2. Анализ</button>
+  <button class="tab-btn" data-tab="tab3" id="tabBtn3" disabled>3. Расширенный спектральный анализ</button>
+</div>
+
+<!-- ================= TAB 1 ================= -->
+<section class="panel active" id="tab1">
+  <div class="row">
+    <button id="fileBtn">Открыть файл...</button>
+    <input type="file" id="fileInput" accept=".txt,.gru,.dat,.csv,.ana,.anp" multiple style="display:none">
+    <span id="fileLabel">Файл не выбран</span>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="excludeNoDataChk"> Не отображать участки без записи (значение ≡ 0) длительностью от, с:</label>
+    <input type="number" id="excludeNoDataDur" value="5" step="1" min="0">
+    <span class="help" style="margin:0; padding:2px 6px;">только для отображения; на данные и расчёт не влияет</span>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="mouseSelectChk"> Выбор мышью на графике (протянуть по горизонтали; для масштабирования/панорамирования снимите этот флажок)</label>
+  </div>
+
+  <div id="fullPlot" class="plot"></div>
+
+  <div class="row">
+    <label>Время события, с:</label>
+    <input type="text" id="eventTime">
+    <label>окно до, с:</label>
+    <input type="text" id="windowBefore" value="10">
+    <label>окно после, с:</label>
+    <input type="text" id="windowAfter" value="10">
+  </div>
+
+  <div class="row">
+    <label>Диапазон, с: от</label>
+    <input type="text" id="rangeFrom">
+    <label>до</label>
+    <input type="text" id="rangeTo">
+    <button id="selectBtn">Выбрать</button>
+    <span class="help" style="margin:0; padding:2px 6px;">— именно этот диапазон используется далее для анализа</span>
+  </div>
+
+  <div class="help">
+    Диапазон можно задать: временем события и окнами до/после (поля "Диапазон" пересчитываются
+    автоматически), протяжкой мыши по графику записи (включите флажок "Выбор мышью" выше —
+    для масштабирования и панорамирования графика снимите его), либо вписав границы прямо
+    в поля "Диапазон". Любой способ только обновляет поля и подсвечивает выбор на графике —
+    сама запись не обрезается и никуда не пропадает. Данные обрезаются только по нажатию
+    кнопки "Выбрать". Возврат на эту вкладку в любой момент снова показывает полную запись
+    с подсветкой последнего диапазона.
+  </div>
+
+  <fieldset>
+    <legend>Параметры проезда (необязательно)</legend>
+    <div class="row">
+      <label>Длина пролёта, м:</label>
+      <input type="text" id="spanLength">
+      <label>Расчётная скорость, км/ч:</label>
+      <input type="text" id="designSpeed">
+      <label>База автомобиля, м:</label>
+      <input type="text" id="wheelbase">
+    </div>
+    <div class="help" style="margin:4px 0 0;">
+      Используются на этапе 2 для физически обоснованного выбора частоты первой формы
+      (период = время прохождения пролёта на расчётной скорости) и сопоставления расчётной
+      и фактической скорости в результатах. Можно оставить пустыми.
+    </div>
+  </fieldset>
+</section>
+
+<!-- ================= TAB 2 ================= -->
+<section class="panel" id="tab2">
+  <div class="row">
+    <label>Название точки расчёта:</label>
+    <input type="text" id="pointName" class="wide">
+  </div>
+  <div class="row" style="align-items:flex-start;">
+    <label style="padding-top:4px;">Комментарий:</label>
+    <textarea id="comment" style="flex:1; min-width:260px;"></textarea>
+  </div>
+
+  <div class="row">
+    <label>Длительность нулевого участка, с:</label>
+    <input type="text" id="baselineDur" value="2">
+    <label>Частота среза 1-й формы, Гц:</label>
+    <input type="text" id="cutoffHz">
+    <button class="secondary" id="autoCutoffBtn">Авто</button>
+    <label>Окрестность поиска динамики, с:</label>
+    <input type="text" id="neighborhood" value="1">
+  </div>
+
+  <div class="row">
+    <label>Спектральный анализ — задержка от максимума, с:</label>
+    <input type="text" id="specDelay" value="5">
+    <label>Длительность окна спектра, с:</label>
+    <input type="text" id="specWindow" value="10">
+    <button class="secondary" id="refreshSpectralBtn">Обновить</button>
+    <label><input type="checkbox" id="spectrumBarChk"> Столбчатая диаграмма спектра (вместо линии)</label>
+  </div>
+
+  <div class="row">
+    <button id="analyzeBtn">Анализ</button>
+    <button class="secondary" id="saveCsvBtn" disabled>Скачать CSV...</button>
+    <button class="secondary" id="printReportBtn" disabled>Печать отчёта (PDF)...</button>
+  </div>
+
+  <div class="results-grid">
+    <div class="results-box">
+      <h3>Результаты</h3>
+      <div class="line" id="resStatic">Макс. статическое значение: —</div>
+      <div class="line" id="resDynamic">Макс. динамическое значение: —</div>
+      <div class="line" id="resKd">Динамический коэффициент: —</div>
+      <div class="line" id="resSpectral">Спектральный анализ: —</div>
+      <div class="line" id="resSpeed">Скорость движения: —</div>
+    </div>
+    <div class="results-box">
+      <h3>Справочная информация</h3>
+      <pre id="infoFirstMode">Кандидаты в частоту первой формы появятся после анализа.</pre>
+      <pre id="infoSpectral">Метод определения частот и дискретизация спектра появятся после анализа.</pre>
+    </div>
+  </div>
+
+  <div id="previewPlot" class="plot"></div>
+  <div id="resultsPlot" class="plot tall" style="display:none;"></div>
+</section>
+
+<!-- ================= TAB 3 ================= -->
+<section class="panel" id="tab3">
+  <div class="help">
+    Развёртка спектрального анализа по задержке от максимума: при фиксированной длине окна
+    для набора задержек (от / до / шаг) определяются пиковые частоты. Устойчивая
+    (не зависящая от задержки) частота — это, как правило, частота собственных колебаний
+    конструкции, в отличие от случайных/переходных пиков.
+  </div>
+
+  <div class="row">
+    <label>Длина окна, с:</label>
+    <input type="text" id="sweepWindow" value="10">
+    <label>Задержка от, с:</label>
+    <input type="text" id="sweepFrom" value="0">
+    <label>до, с:</label>
+    <input type="text" id="sweepTo" value="20">
+    <label>шаг, с:</label>
+    <input type="text" id="sweepStep" value="0.5">
+    <button id="runSweepBtn">Запустить развёртку</button>
+  </div>
+
+  <div class="row">
+    <label>Фильтр по частоте, Гц: больше</label>
+    <input type="text" id="sweepFreqMin">
+    <label>меньше</label>
+    <input type="text" id="sweepFreqMax">
+    <label>Скрыть пики с амплитудой более:</label>
+    <input type="text" id="sweepAmpMax">
+    <button class="secondary" id="applySweepFilterBtn">Применить фильтр</button>
+  </div>
+
+  <div class="status-bar" id="sweepStatus">Развёртка ещё не выполнялась.</div>
+
+  <div class="two-col">
+    <div class="sweep-table-wrap">
+      <table class="sweep-table" id="sweepTable">
+        <thead>
+          <tr><th>Задержка, с</th><th>Пик 1, Гц</th><th>Пик 2, Гц</th><th>Пик 3, Гц</th><th>Пик 4, Гц</th><th>Пик 5, Гц</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="sweepPlot" class="plot half"></div>
+  </div>
+</section>
+
+<div class="status-bar" id="statusBar">Откройте файл тензограммы.</div>
+<p class="footer-note">
+  Метод расчёта идентичен настольной версии — см.
+  <a href="https://github.com/knvspb/DynaImpact#метод-расчёта">README проекта</a>.
+</p>
+
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
